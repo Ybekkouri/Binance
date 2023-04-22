@@ -1,0 +1,96 @@
+import os
+import time
+import math
+import ccxt
+import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.externals import joblib
+
+# Bot parameters
+symbol = 'BTC/USDT'
+initial_capital = 100
+goal_capital = 1000000
+increment_amount = 10
+model_path = 'model.pkl'
+
+# Exchange parameters
+exchange_id = 'binance'
+exchange_class = getattr(ccxt, exchange_id)
+exchange = exchange_class({
+    'apiKey': os.environ['BINANCE_API_KEY'],
+    'secret': os.environ['BINANCE_SECRET_KEY'],
+    'timeout': 30000,
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+
+# Load or create machine learning model
+if os.path.isfile(model_path):
+    model = joblib.load(model_path)
+else:
+    model = GradientBoostingClassifier()
+    
+# Function to get current balance
+def get_balance():
+    balance = exchange.fetch_balance()
+    free = balance['USDT']['free']
+    used = balance['USDT']['used']
+    total = free + used
+    return total
+
+# Function to place a trade
+def place_trade(direction, amount):
+    if direction == 'buy':
+        order = exchange.create_order(symbol, 'market', 'buy', amount)
+    elif direction == 'sell':
+        order = exchange.create_order(symbol, 'market', 'sell', amount)
+    else:
+        return None
+    return order
+
+# Function to train the machine learning model
+def train_model(df):
+    X = df.iloc[:,:-1]
+    y = df.iloc[:,-1]
+    model.fit(X, y)
+
+# Function to predict the market direction
+def predict_direction(df):
+    X = df.iloc[-1:,:]
+    direction = model.predict(X)[0]
+    return direction
+
+# Function to update the machine learning model
+def update_model():
+    trades = exchange.fetch_my_trades(symbol)
+    trades_df = pd.DataFrame(trades)
+    trades_df = trades_df[['datetime', 'side', 'price']]
+    trades_df['datetime'] = pd.to_datetime(trades_df['datetime'])
+    trades_df = trades_df.set_index('datetime')
+    trades_df = trades_df.sort_index()
+    trades_df = trades_df.resample('1T').last().ffill()
+    trades_df['returns'] = trades_df['price'].pct_change()
+    trades_df = trades_df.dropna()
+    trades_df['direction'] = trades_df['returns'].apply(lambda x: 1 if x > 0 else 0)
+    train_model(trades_df)
+
+# Main function to run the bot
+def run_bot():
+    capital = initial_capital
+    while capital < goal_capital:
+        try:
+            # Get current balance
+            balance = get_balance()
+            print(f"Current balance: {balance:.2f} USDT")
+
+            # Predict market direction
+            ohlcv = exchange.fetch_ohlcv(symbol, '1m', limit=30)
+            ohlcv_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            ohlcv_df['timestamp'] = pd.to_datetime(ohlcv_df['timestamp'], unit='ms')
+            ohlcv_df = ohlcv_df.set_index('timestamp')
+            direction = predict_direction(ohlcv_df)
+
+            # Place trade
+            if direction == 1:
+                trade_amount = math.floor(capital / increment_amount) * increment_amount
+                if capital > 1000 and
