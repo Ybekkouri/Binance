@@ -1,0 +1,35 @@
+# ============================================================
+# Binance USDS-M Futures bot configuration
+# ============================================================
+
+exchange:
+  # ALWAYS start with testnet: true. Only flip to false once the bot
+  # has run profitably on the testnet for a while and you understand
+  # exactly what it does with real money.
+  testnet: true
+
+trading:
+  symbol: BTC/USDT
+  timeframe: 15m          # candle size the strategy runs on
+  leverage: 3             # keep this low; leverage amplifies losses too
+  margin_mode: isolated   # isolated caps the damage to the position margin
+
+strategy:
+  ema_fast: 20
+  ema_slow: 50
+  rsi_period: 14
+  rsi_overbought: 70      # don't open longs above this
+  rsi_oversold: 30        # don't open shorts below this
+  atr_period: 14
+  stop_atr_mult: 1.5      # stop-loss distance = 1.5 x ATR
+  take_profit_atr_mult: 2.25  # take-profit distance = 2.25 x ATR (1.5R)
+
+risk:
+  risk_per_trade_pct: 1.0   # % of equity risked per trade (distance to stop)
+  daily_profit_target: 50   # stop trading for the day once up this much (USDT)
+  daily_max_loss: 30        # stop trading for the day once down this much (USDT)
+  max_position_notional: 5000  # hard cap on position size in USDT
+
+bot:
+  poll_seconds: 30          # how often to check for candle close / position state
+  state_file: bot_state.json
