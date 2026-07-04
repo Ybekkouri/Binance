@@ -31,9 +31,9 @@ class Trader:
 
     def run(self) -> None:
         log.info(
-            "Bot started: %s %s | target +%.0f / max loss -%.0f USDT per day",
+            "Bot started: %s %s | daily target +%.1f%% / max loss -%.1f%% of equity",
             self.cfg.symbol, self.cfg.timeframe,
-            self.cfg.daily_profit_target, self.cfg.daily_max_loss,
+            self.cfg.daily_profit_target_pct, self.cfg.daily_max_loss_pct,
         )
         while True:
             try:
@@ -53,7 +53,8 @@ class Trader:
         if self.entry_time_ms is not None:
             self._settle_closed_trade()
 
-        ok, reason = self.risk.can_trade()
+        equity = self.exchange.equity_usdt()
+        ok, reason = self.risk.can_trade(equity)
         if not ok:
             log.info(reason)
             return
@@ -69,7 +70,6 @@ class Trader:
             return
         self.last_signal_candle = signal_candle
 
-        equity = self.exchange.equity_usdt()
         amount = self.risk.position_size(equity, signal.entry_price, signal.stop_price)
         amount = self.exchange.amount_to_precision(amount)
         if amount <= 0:
@@ -93,9 +93,12 @@ class Trader:
         except ccxt.BaseError:
             log.exception("Could not fetch realized PnL; recording 0.")
             pnl = 0.0
-        self.risk.record_trade(pnl)
+        self.risk.record_trade(pnl, self.exchange.equity_usdt())
+        target, max_loss = self.risk.daily_limits()
         log.info(
-            "Trade closed: %+.2f USDT | today: %+.2f USDT over %d trade(s)",
+            "Trade closed: %+.2f USDT | today: %+.2f USDT over %d trade(s) "
+            "(target +%.2f / limit -%.2f)",
             pnl, self.risk.state.realized_pnl, self.risk.state.trades,
+            target, max_loss,
         )
         self.entry_time_ms = None

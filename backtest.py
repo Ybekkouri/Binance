@@ -31,8 +31,8 @@ def make_cfg(args) -> Config:
         ema_fast=20, ema_slow=50,
         rsi_period=14, rsi_overbought=70, rsi_oversold=30,
         atr_period=14, stop_atr_mult=1.5, take_profit_atr_mult=2.25,
-        risk_per_trade_pct=args.risk, daily_profit_target=args.target,
-        daily_max_loss=args.max_loss, max_position_notional=1e9,
+        risk_per_trade_pct=args.risk, daily_profit_target_pct=args.target_pct,
+        daily_max_loss_pct=args.max_loss_pct, max_position_notional_mult=args.leverage,
         poll_seconds=0, state_file="",
     )
 
@@ -53,20 +53,25 @@ def fetch_history(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
     return df.set_index("timestamp")
 
 
-def run_backtest(df: pd.DataFrame, cfg: Config, start_equity: float) -> pd.DataFrame:
+def run_backtest(df: pd.DataFrame, cfg: Config, start_equity: float):
     """Bar-by-bar simulation. Conservative assumption: if a bar touches both
-    the stop and the take-profit, the stop is filled first."""
+    the stop and the take-profit, the stop is filled first.
+
+    Daily limits are percentages of the equity at the start of each day,
+    mirroring the live RiskManager."""
     ind = strategy.add_indicators(df, cfg)
     equity = start_equity
     trades = []
     position = None  # dict(side, entry, stop, tp, amount)
     day_pnl: dict = {}
+    day_equity_start: dict = {}
 
     warmup = max(cfg.ema_slow, cfg.rsi_period, cfg.atr_period) + 2
     for i in range(warmup, len(ind)):
         bar = ind.iloc[i]
         day = bar.name.strftime("%Y-%m-%d")
         day_pnl.setdefault(day, 0.0)
+        day_equity_start.setdefault(day, equity)
 
         if position is not None:
             hit_stop = (bar["low"] <= position["stop"] if position["side"] == "long"
@@ -87,14 +92,19 @@ def run_backtest(df: pd.DataFrame, cfg: Config, start_equity: float) -> pd.DataF
                 })
                 position = None
 
-        if position is None and day_pnl[day] < cfg.daily_profit_target \
-                and day_pnl[day] > -cfg.daily_max_loss:
+        day_target = day_equity_start[day] * cfg.daily_profit_target_pct / 100.0
+        day_max_loss = day_equity_start[day] * cfg.daily_max_loss_pct / 100.0
+        if position is None and day_pnl[day] < day_target and day_pnl[day] > -day_max_loss:
             window = df.iloc[: i + 1]
             sig = strategy.evaluate(window, cfg)
             if sig is not None:
                 stop_dist = abs(sig.entry_price - sig.stop_price)
                 amount = (equity * cfg.risk_per_trade_pct / 100.0) / stop_dist
-                amount = min(amount, equity * cfg.leverage * 0.95 / sig.entry_price)
+                amount = min(
+                    amount,
+                    equity * cfg.max_position_notional_mult / sig.entry_price,
+                    equity * cfg.leverage * 0.95 / sig.entry_price,
+                )
                 if amount > 0:
                     position = {
                         "side": sig.side, "entry": sig.entry_price,
@@ -102,7 +112,11 @@ def run_backtest(df: pd.DataFrame, cfg: Config, start_equity: float) -> pd.DataF
                         "amount": amount,
                     }
 
-    return pd.DataFrame(trades), pd.Series(day_pnl, name="daily_pnl")
+    daily = pd.DataFrame({
+        "pnl": pd.Series(day_pnl),
+        "target": pd.Series(day_equity_start) * cfg.daily_profit_target_pct / 100.0,
+    })
+    return pd.DataFrame(trades), daily
 
 
 def main() -> None:
@@ -113,8 +127,10 @@ def main() -> None:
     parser.add_argument("--equity", type=float, default=5000)
     parser.add_argument("--risk", type=float, default=1.0, help="%% risk per trade")
     parser.add_argument("--leverage", type=int, default=3)
-    parser.add_argument("--target", type=float, default=50, help="daily profit target USDT")
-    parser.add_argument("--max-loss", type=float, default=30, help="daily max loss USDT")
+    parser.add_argument("--target-pct", type=float, default=2.0,
+                        help="daily profit target as %% of equity")
+    parser.add_argument("--max-loss-pct", type=float, default=1.5,
+                        help="daily max loss as %% of equity")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -135,11 +151,12 @@ def main() -> None:
     print(f"Win rate:          {len(wins) / len(trades) * 100:.1f}%")
     print(f"Total PnL:         {trades.pnl.sum():+.2f} USDT")
     print(f"Final equity:      {trades.equity.iloc[-1]:.2f} USDT")
-    print(f"Best day:          {daily.max():+.2f} USDT")
-    print(f"Worst day:         {daily.min():+.2f} USDT")
-    print(f"Average day:       {daily.mean():+.2f} USDT")
-    print(f"Days >= +{args.target:.0f}:      {(daily >= args.target).sum()} / {len(daily)}")
-    print(f"Losing days:       {(daily < 0).sum()} / {len(daily)}")
+    print(f"Best day:          {daily.pnl.max():+.2f} USDT")
+    print(f"Worst day:         {daily.pnl.min():+.2f} USDT")
+    print(f"Average day:       {daily.pnl.mean():+.2f} USDT")
+    print(f"Target-hit days:   {(daily.pnl >= daily.target).sum()} / {len(daily)} "
+          f"(target = +{args.target_pct:.1f}% of that day's equity)")
+    print(f"Losing days:       {(daily.pnl < 0).sum()} / {len(daily)}")
 
 
 if __name__ == "__main__":

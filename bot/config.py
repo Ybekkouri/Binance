@@ -27,11 +27,11 @@ class Config:
     atr_period: int
     stop_atr_mult: float
     take_profit_atr_mult: float
-    # risk
+    # risk (all relative to account equity)
     risk_per_trade_pct: float
-    daily_profit_target: float
-    daily_max_loss: float
-    max_position_notional: float
+    daily_profit_target_pct: float
+    daily_max_loss_pct: float
+    max_position_notional_mult: float
     # bot
     poll_seconds: int
     state_file: str
@@ -70,9 +70,9 @@ def load_config(path: str = "config.yaml") -> Config:
         stop_atr_mult=float(st["stop_atr_mult"]),
         take_profit_atr_mult=float(st["take_profit_atr_mult"]),
         risk_per_trade_pct=float(rk["risk_per_trade_pct"]),
-        daily_profit_target=float(rk["daily_profit_target"]),
-        daily_max_loss=float(rk["daily_max_loss"]),
-        max_position_notional=float(rk["max_position_notional"]),
+        daily_profit_target_pct=float(rk["daily_profit_target_pct"]),
+        daily_max_loss_pct=float(rk["daily_max_loss_pct"]),
+        max_position_notional_mult=float(rk["max_position_notional_mult"]),
         poll_seconds=int(bt["poll_seconds"]),
         state_file=bt["state_file"],
     )

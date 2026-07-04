@@ -1,9 +1,12 @@
 # Binance Futures Trading Bot
 
 A trend-following bot for Binance USDⓈ-M futures with strict risk management,
-built around a **daily profit target** (default: +50 USDT) and a **daily loss
-cap** (default: −30 USDT). When either limit is hit, the bot stops opening
-positions until the next UTC day.
+built around a **daily profit target** (default: +2% of equity) and a **daily
+loss cap** (default: −1.5% of equity). All limits are ratios of account
+equity, so they adapt automatically as the account grows or shrinks — with
+1,000 USDT the bot stops for the day at +20 or −15; with 2,500 USDT at +50 or
+−37.5. When either limit is hit, the bot stops opening positions until the
+next UTC day.
 
 > ⚠️ **Read this first.** Futures trading with leverage can lose money faster
 > than you can react, up to your entire margin. No strategy — this one
@@ -24,6 +27,8 @@ positions until the next UTC day.
   (distance to stop), capped by leverage and a max notional.
 - **Daily discipline**: realized PnL (fees included) is tracked per UTC day
   and persisted to `bot_state.json`, so restarts don't reset your limits.
+  The day's target and loss cap are computed from an equity snapshot taken at
+  the start of the day, so the goalposts don't move intraday.
 
 ## Setup
 
@@ -66,14 +71,18 @@ Everything lives in `config.yaml`: symbol, timeframe, leverage, strategy
 periods, risk per trade, and the daily target/loss limits. Secrets stay in
 `.env` and are never committed.
 
-## The math behind "50 a day"
+## The math behind the daily target
 
 Risking 1% per trade with a 1.5R take-profit means each winner makes about
-1.5% of equity before fees. For +50 USDT to be *reachable* on a typical
-winning day (1–2 winners), you want roughly **2,000–4,000 USDT of equity**.
-With a small account the bot still works, but the daily target will rarely be
-hit — raising leverage or risk-per-trade to force it is how accounts blow up.
-Run the backtest with your actual equity to see realistic numbers.
+1.5% of equity before fees, and the strategy fires roughly 1–3 signals a day
+on 15-minute candles. That's why the default target is **+2% of equity per
+day** — one or two net winners reach it, and the bot banks the day instead of
+giving profits back. In absolute terms the target scales with the account:
+about +20 USDT/day at 1,000 equity, and +50 USDT/day once equity reaches
+~2,500 (through compounding or deposits). Forcing bigger absolute numbers out
+of a small account by raising leverage or risk-per-trade is how accounts blow
+up. Run the backtest with your actual equity to see realistic numbers:
+even +2%/day is an aggressive goal that no strategy sustains every day.
 
 ## Project layout
 
