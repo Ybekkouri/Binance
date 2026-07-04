@@ -30,6 +30,7 @@ bot/
   trader.py            orchestrator loop, kill switch, data-outage protection
   journal.py           JSONL audit log of every decision and order
   datastore.py         SQLite research dataset: snapshots, decisions, outcomes
+  analysis.py          the complete statistical analysis over the dataset
   metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
 ```
 
@@ -159,6 +160,35 @@ python research.py factors                   # both (win rates are unit-free)
 ```
 
 Shadow data never influences execution — it only informs the research loop.
+
+### The complete analysis report
+
+```bash
+python research.py report [--source all|real|shadow] [--out report.txt]
+```
+
+One command, every question that matters, with statistical honesty built in
+(Wilson confidence intervals on every win rate; `*` marks differences that
+clear a 95% two-sided z-test — everything unstarred is noise until more data
+arrives):
+
+- **Overview** — win rate with confidence interval, profit factor, expectancy
+- **Tracks** — the strict real track vs the relaxed shadow track, with a
+  significance test on the win-rate edge: what do stricter thresholds buy?
+- **Confidence calibration** — do higher-confidence decisions actually win
+  more? Tests top vs bottom bucket; warns loudly if calibration is inverted
+- **Market conditions / exits / symbols / direction / timing** — where the
+  edge lives and where it doesn't (regime, exit reason, hour block, weekday)
+- **Context metrics** — funding rate, open interest change, book imbalance,
+  long/short ratio, taker flow, spread: each split at its median and
+  significance-tested. This is the evidence base for promoting a recorded
+  metric to a voting factor
+- **Factors** — per-factor aligned/against performance with confidence
+  intervals and z-scores vs the baseline
+
+The report warns about small samples and about multiple-comparison false
+positives (test enough metrics at 95% and one will star by chance) — trust
+only effects that stay significant as the dataset grows.
 
 The learning discipline, in order: **collect → measure → suggest → validate
 out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),

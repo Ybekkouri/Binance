@@ -11,6 +11,13 @@ knowledge — WITHOUT ever touching the live configuration by itself:
       Standalone data collector: keeps snapshotting all configured symbols
       into the datastore even when the bot isn't trading. No keys needed.
 
+  python research.py report [--source all|real|shadow] [--out report.txt]
+      THE complete analysis: overview with confidence intervals, real-vs-
+      shadow comparison, confidence calibration, market-condition/exit/
+      symbol/direction/timing breakdowns, context-metric significance tests
+      (the evidence for promoting recorded metrics to voting factors), and
+      per-factor statistics.
+
   python research.py factors [--min-trades 20] [--write config_suggested.yaml]
       Which factors actually predicted wins? Per-factor aligned/against win
       rates and PnL, plus bounded weight suggestions once there's enough
@@ -33,7 +40,7 @@ import time
 
 import yaml
 
-from bot import metrics
+from bot import analysis, metrics
 from bot.config import load_config
 from bot.datastore import DataStore
 
@@ -213,6 +220,18 @@ def cmd_stats(args) -> None:
     print(json.dumps(store.counts(), indent=2))
 
 
+def cmd_report(args) -> None:
+    cfg = load_config(args.config, require_keys=False)
+    store = DataStore(cfg.datastore_file)
+    trades = store.trades_full(args.source)
+    text = analysis.full_report(trades, args.source)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text + "\n")
+        print(f"\nReport written to {args.out}")
+
+
 # ------------------------------------------------------------ cli
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -221,6 +240,10 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("stats", help="dataset size")
+
+    p = sub.add_parser("report", help="the complete analysis report")
+    p.add_argument("--source", choices=["all", "real", "shadow"], default="all")
+    p.add_argument("--out", default=None, help="also write the report to a file")
 
     p = sub.add_parser("collect", help="standalone snapshot collector")
     p.add_argument("--interval", type=int, default=300, help="seconds between rounds")
@@ -241,7 +264,7 @@ def main() -> None:
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    {"stats": cmd_stats, "collect": cmd_collect,
+    {"stats": cmd_stats, "collect": cmd_collect, "report": cmd_report,
      "factors": cmd_factors, "compare": cmd_compare}[args.command](args)
 
 

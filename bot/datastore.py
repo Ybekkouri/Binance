@@ -138,6 +138,35 @@ class DataStore:
             for r in rows
         ]
 
+    def trades_full(self, source: str = "all") -> list[dict]:
+        """Closed trades with their decision AND the market snapshot the
+        decision was made from — the complete context for analysis."""
+        where = {"all": "", "real": "AND t.shadow=0", "shadow": "AND t.shadow=1"}[source]
+        rows = self.conn.execute(
+            f"""SELECT t.pnl, t.side, t.symbol, t.opened_ts, t.closed_ts,
+                       t.exit_reason, t.shadow,
+                       d.confidence, d.risk_reward, d.market_condition, d.votes,
+                       s.funding_rate, s.oi_change_pct, s.spread_pct,
+                       s.book_imbalance, s.long_short_ratio,
+                       s.taker_buy_sell_ratio, s.btc_trend
+                FROM trades t
+                JOIN decisions d ON d.id = t.decision_id
+                LEFT JOIN snapshots s ON s.id = d.snapshot_id
+                WHERE t.decision_id IS NOT NULL {where}"""
+        ).fetchall()
+        keys = ["pnl", "side", "symbol", "opened_ts", "closed_ts",
+                "exit_reason", "shadow", "confidence", "risk_reward",
+                "market_condition", "votes", "funding_rate", "oi_change_pct",
+                "spread_pct", "book_imbalance", "long_short_ratio",
+                "taker_buy_sell_ratio", "btc_trend"]
+        out = []
+        for r in rows:
+            d = dict(zip(keys, r))
+            d["votes"] = json.loads(d["votes"]) if d["votes"] else []
+            d["shadow"] = bool(d["shadow"])
+            out.append(d)
+        return out
+
     def counts(self) -> dict:
         out = {}
         for table in ("snapshots", "decisions", "trades"):
