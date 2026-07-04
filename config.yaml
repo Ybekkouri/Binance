@@ -98,3 +98,4 @@ bot:
   kill_file: KILL                  # touch this file to trigger emergency stop
   close_positions_on_kill: true    # kill switch also flattens all positions
   max_stale_data_seconds: 180      # halt new entries if data older than this
+  datastore_file: market_data.db   # research dataset: snapshots, decisions, outcomes

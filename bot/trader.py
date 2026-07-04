@@ -24,15 +24,23 @@ from .decision import LONG, NO_TRADE
 log = logging.getLogger("bot.trader")
 
 
+def _tf_seconds(timeframe: str) -> int:
+    unit = timeframe[-1]
+    n = int(timeframe[:-1])
+    return n * {"m": 60, "h": 3600, "d": 86400}[unit]
+
+
 class Trader:
-    def __init__(self, cfg, market, broker, risk, manager, journal):
+    def __init__(self, cfg, market, broker, risk, manager, journal,
+                 datastore=None):
         self.cfg = cfg
         self.market = market
         self.broker = broker
         self.risk = risk
         self.manager = manager
         self.journal = journal
-        self.last_entry_candle: dict = {}   # symbol -> candle ts of last entry
+        self.datastore = datastore
+        self.last_eval_candle: dict = {}    # symbol -> evaluated candle ts
         self.data_failures = 0
 
     # ------------------------------------------------------------ loop
@@ -93,19 +101,24 @@ class Trader:
             self.manager.manage(snap, opposing_decision=decision)
             return
 
-        # Journal every decision — including NO_TRADE — for auditability.
+        # Signals come from closed candles, so evaluate/record each candle once.
+        candle_ts = str(snap.candles.index[-1]) if len(snap.candles) else ""
+        if self.last_eval_candle.get(symbol) == candle_ts:
+            return
+        self.last_eval_candle[symbol] = candle_ts
+
+        # Journal + dataset: every decision, including NO_TRADE.
         self.journal.decision(decision, snap.summary())
+        decision_id = None
+        if self.datastore is not None:
+            snapshot_id = self.datastore.record_snapshot(snap)
+            decision_id = self.datastore.record_decision(decision, snapshot_id)
         if decision.direction == NO_TRADE:
             return
 
-        # New candle guard: one attempt per signal candle.
-        candle_ts = str(snap.candles.index[-1])
-        if self.last_entry_candle.get(symbol) == candle_ts:
-            return
+        self._try_enter(decision, snap, decision_id)
 
-        self._try_enter(decision, snap, candle_ts)
-
-    def _try_enter(self, decision, snap, candle_ts: str) -> None:
+    def _try_enter(self, decision, snap, decision_id=None) -> None:
         symbol = decision.symbol
         equity = self.broker.equity_usdt()
         positions = self.broker.open_positions()
@@ -135,7 +148,6 @@ class Trader:
         tp1_amount = self.broker.amount_to_precision(
             symbol, amount * self.cfg.exits.tp1_fraction
         )
-        self.last_entry_candle[symbol] = candle_ts
 
         log.info(
             "ENTER %s %s: size %s @ ~%.2f, SL %.2f, TP1 %.2f, TP2 %.2f, "
@@ -157,7 +169,10 @@ class Trader:
                                          decision.take_profit_2)
             self.journal.order("entry_bracket", symbol, request,
                                {"id": response.get("id")})
-            self.manager.on_entry(decision, amount, equity)
+            if self.datastore is not None and decision_id is not None:
+                self.datastore.mark_executed(decision_id)
+            self.manager.on_entry(decision, amount, equity,
+                                  decision_id=decision_id)
         except ccxt.BaseError as e:
             self.journal.error("execution", f"{symbol}: {e}")
             raise

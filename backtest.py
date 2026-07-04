@@ -253,28 +253,18 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
     return trades_df, daily
 
 
-# ------------------------------------------------------------ cli
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--symbol", default=None, help="default: first configured symbol")
-    parser.add_argument("--days", type=int, default=90)
-    parser.add_argument("--equity", type=float, default=1000)
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cfg = load_config(args.config, require_keys=False)
-    symbol = args.symbol or cfg.symbols[0]
+# ------------------------------------------------------------ reusable runner
+def run(cfg, symbol: str, days: int, equity: float, client=None):
+    """Fetch data and backtest one symbol. Returns (trades, daily, metrics).
+    Used by the CLI below and by research.py for config comparison."""
     cfg.symbols = [symbol]
-
-    client = ccxt.binanceusdm({"enableRateLimit": True})
-    print(f"Fetching {args.days} days of {symbol} {cfg.timeframe} data...")
-    df = fetch_history(client, symbol, cfg.timeframe, args.days)
+    client = client or ccxt.binanceusdm({"enableRateLimit": True})
+    df = fetch_history(client, symbol, cfg.timeframe, days)
     trend_df = resample(df, cfg.trend_timeframe)
-    funding = fetch_funding(client, symbol, args.days)
+    funding = fetch_funding(client, symbol, days)
 
     if cfg.strategy.btc_filter and symbol != "BTC/USDT":
-        btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, args.days),
+        btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, days),
                        cfg.trend_timeframe)
         fast = ema(btc["close"], cfg.strategy.trend_ema_fast)
         slow = ema(btc["close"], cfg.strategy.trend_ema_slow)
@@ -287,16 +277,32 @@ def main() -> None:
         def btc_trend_lookup(ts):
             return 0
 
-    print(f"Got {len(df)} candles. Simulating with {args.equity:.0f} USDT...")
     trades, daily = run_backtest(cfg, df, trend_df, btc_trend_lookup,
-                                 funding, args.equity)
-
+                                 funding, equity)
     # include flat days so Sharpe/Sortino aren't overstated
     if len(daily):
         all_days = pd.date_range(daily.index[0], daily.index[-1], freq="D")
-        daily = daily.reindex([d.strftime("%Y-%m-%d") for d in all_days], fill_value=0.0)
+        daily = daily.reindex([d.strftime("%Y-%m-%d") for d in all_days],
+                              fill_value=0.0)
+    m = metrics.compute(trades, daily, equity)
+    return trades, daily, m
 
-    m = metrics.compute(trades, daily, args.equity)
+
+# ------------------------------------------------------------ cli
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--symbol", default=None, help="default: first configured symbol")
+    parser.add_argument("--days", type=int, default=90)
+    parser.add_argument("--equity", type=float, default=1000)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    cfg = load_config(args.config, require_keys=False)
+    symbol = args.symbol or cfg.symbols[0]
+
+    print(f"Fetching {args.days} days of {symbol} {cfg.timeframe} data...")
+    trades, daily, m = run(cfg, symbol, args.days, args.equity)
     print()
     print(metrics.format_report(m, daily))
     if m.get("trades", 0):

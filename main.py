@@ -13,6 +13,7 @@ import logging
 
 from bot.broker import make_broker
 from bot.config import load_config
+from bot.datastore import DataStore
 from bot.journal import Journal
 from bot.manager import TradeManager
 from bot.market_data import MarketData
@@ -50,9 +51,11 @@ def main() -> None:
         return
 
     journal = Journal(cfg.journal_file)
+    datastore = DataStore(cfg.datastore_file)
     risk = RiskEngine(cfg)
-    manager = TradeManager(cfg, broker, risk, journal)
-    trader = Trader(cfg, MarketData(cfg), broker, risk, manager, journal)
+    manager = TradeManager(cfg, broker, risk, journal, datastore=datastore)
+    trader = Trader(cfg, MarketData(cfg), broker, risk, manager, journal,
+                    datastore=datastore)
     trader.run()
 
 

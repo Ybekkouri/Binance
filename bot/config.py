@@ -94,6 +94,7 @@ class Config:
     kill_file: str = "KILL"
     close_positions_on_kill: bool = True
     max_stale_data_seconds: int = 180
+    datastore_file: str = "market_data.db"
 
 
 def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
@@ -185,6 +186,7 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
         kill_file=bt["kill_file"],
         close_positions_on_kill=bool(bt["close_positions_on_kill"]),
         max_stale_data_seconds=int(bt["max_stale_data_seconds"]),
+        datastore_file=bt.get("datastore_file", "market_data.db"),
     )
     if cfg.leverage > cfg.risk.max_leverage:
         raise SystemExit(

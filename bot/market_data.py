@@ -37,6 +37,8 @@ class MarketSnapshot:
     oi_change_pct: Optional[float] = None     # open interest change, recent window
     book: Optional[BookSummary] = None
     btc_trend: int = 0               # +1/-1/0, higher-timeframe BTC direction
+    long_short_ratio: Optional[float] = None      # global long/short accounts
+    taker_buy_sell_ratio: Optional[float] = None  # aggressive buy vs sell volume
     taken_at: float = field(default_factory=time.time)
 
     def age_seconds(self) -> float:
@@ -52,6 +54,8 @@ class MarketSnapshot:
             "oi_change_pct": self.oi_change_pct,
             "spread_pct": self.book.spread_pct if self.book else None,
             "book_imbalance": self.book.imbalance if self.book else None,
+            "long_short_ratio": self.long_short_ratio,
+            "taker_buy_sell_ratio": self.taker_buy_sell_ratio,
             "btc_trend": self.btc_trend,
             "candle_time": str(self.candles.index[-1]) if len(self.candles) else None,
         }
@@ -112,6 +116,32 @@ class MarketData:
             log.debug("open interest unavailable for %s: %s", symbol, e)
             return None
 
+    def long_short_ratio(self, symbol: str) -> Optional[float]:
+        """Global long/short account ratio (Binance futures data endpoint).
+        Recorded for research; >1 means more accounts are long."""
+        try:
+            rows = self.client.fapiDataGetGlobalLongShortAccountRatio({
+                "symbol": self.client.market_id(symbol),
+                "period": "1h", "limit": 1,
+            })
+            return float(rows[-1]["longShortRatio"]) if rows else None
+        except (ccxt.BaseError, KeyError, ValueError) as e:
+            log.debug("long/short ratio unavailable for %s: %s", symbol, e)
+            return None
+
+    def taker_buy_sell_ratio(self, symbol: str) -> Optional[float]:
+        """Taker buy/sell volume ratio — aggressive flow direction.
+        Recorded for research; >1 means aggressive buying dominates."""
+        try:
+            rows = self.client.fapiDataGetTakerlongshortRatio({
+                "symbol": self.client.market_id(symbol),
+                "period": "1h", "limit": 1,
+            })
+            return float(rows[-1]["buySellRatio"]) if rows else None
+        except (ccxt.BaseError, KeyError, ValueError) as e:
+            log.debug("taker ratio unavailable for %s: %s", symbol, e)
+            return None
+
     def btc_trend(self) -> int:
         """Higher-timeframe BTC direction used as the market filter."""
         from . import indicators
@@ -137,4 +167,6 @@ class MarketData:
             oi_change_pct=self.oi_change_pct(symbol),
             book=self.book_summary(symbol, st.book_depth_levels),
             btc_trend=btc_trend,
+            long_short_ratio=self.long_short_ratio(symbol),
+            taker_buy_sell_ratio=self.taker_buy_sell_ratio(symbol),
         )

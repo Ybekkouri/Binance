@@ -2,6 +2,8 @@
 bot_state.json
 paper_state.json
 journal.jsonl
+market_data.db
+config_suggested.yaml
 KILL
 __pycache__/
 *.pyc

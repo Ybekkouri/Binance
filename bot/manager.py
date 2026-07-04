@@ -15,6 +15,7 @@ net at all times — this layer only ever tightens them.
 import logging
 import math
 import time
+from datetime import datetime, timezone
 
 from . import indicators as ta
 from .decision import LONG, SHORT
@@ -25,13 +26,15 @@ LIQ_ATR_BUFFER = 3.0  # flatten if liquidation is within this many ATRs
 
 
 class TradeManager:
-    def __init__(self, cfg, broker, risk, journal):
+    def __init__(self, cfg, broker, risk, journal, datastore=None):
         self.cfg = cfg
         self.broker = broker
         self.risk = risk
         self.journal = journal
+        self.datastore = datastore
 
-    def on_entry(self, decision, amount: float, equity: float) -> None:
+    def on_entry(self, decision, amount: float, equity: float,
+                 decision_id=None) -> None:
         info = {
             "side": "long" if decision.direction == LONG else "short",
             "entry": decision.entry_price,
@@ -43,6 +46,7 @@ class TradeManager:
             "risk_dist": abs(decision.entry_price - decision.stop_loss),
             "breakeven_done": False,
             "opened_ms": int(time.time() * 1000),
+            "decision_id": decision_id,
         }
         self.risk.record_open(decision.symbol, info, equity)
         self.journal.position("opened", decision.symbol, **info)
@@ -57,7 +61,7 @@ class TradeManager:
 
         if position is None:
             if info is not None:
-                self._settle(symbol, info)
+                self._settle(symbol, info, reason=self._exit_reason(symbol))
             return
         if info is None:
             # Position exists that we have no record of (e.g. manual trade).
@@ -78,7 +82,7 @@ class TradeManager:
             self.journal.position("liquidation_guard_close", symbol,
                                   price=price, liquidation=liq)
             self.broker.close_position(symbol)
-            self._settle(symbol, info)
+            self._settle(symbol, info, reason="liquidation_guard")
             return
 
         # 2. Invalidation: confident opposing signal closes the trade early.
@@ -92,7 +96,7 @@ class TradeManager:
                 self.journal.position("invalidation_exit", symbol,
                                       confidence=opposing_decision.confidence)
                 self.broker.close_position(symbol)
-                self._settle(symbol, info)
+                self._settle(symbol, info, reason="invalidation")
                 return
 
         # 3. Breakeven: once +breakeven_at_r, stop goes to entry.
@@ -118,7 +122,14 @@ class TradeManager:
             info["stop"] = new_stop
             self.risk.save()
 
-    def _settle(self, symbol: str, info: dict) -> None:
+    def _exit_reason(self, symbol: str) -> str:
+        """Best-effort exit reason: paper broker knows exactly; live infers
+        that an exchange-side bracket did the closing."""
+        if hasattr(self.broker, "last_exit_reason"):
+            return self.broker.last_exit_reason(symbol) or "bracket"
+        return "bracket"
+
+    def _settle(self, symbol: str, info: dict, reason: str = "bracket") -> None:
         """Position is gone: cancel leftovers, book the PnL, update counters."""
         self.broker.cancel_all(symbol)
         try:
@@ -130,9 +141,16 @@ class TradeManager:
         equity = self.broker.equity_usdt()
         self.risk.record_close(symbol, pnl, equity)
         self.journal.position(
-            "closed", symbol, pnl=pnl, equity=equity,
+            "closed", symbol, pnl=pnl, equity=equity, exit_reason=reason,
             daily_pnl=self.risk.state.daily_pnl,
             consecutive_losses=self.risk.state.consecutive_losses,
         )
-        log.info("%s closed: %+.2f USDT | today %+.2f | equity %.2f",
-                 symbol, pnl, self.risk.state.daily_pnl, equity)
+        if self.datastore is not None:
+            opened_ts = datetime.fromtimestamp(
+                info["opened_ms"] / 1000, tz=timezone.utc).isoformat()
+            self.datastore.record_trade(
+                symbol, info["side"], opened_ts, pnl, reason,
+                decision_id=info.get("decision_id"),
+            )
+        log.info("%s closed (%s): %+.2f USDT | today %+.2f | equity %.2f",
+                 symbol, reason, pnl, self.risk.state.daily_pnl, equity)

@@ -16,10 +16,11 @@ factors align and every risk control is satisfied. The default action is
 ```
 main.py                entry point (+ --close-all manual override)
 backtest.py            historical simulation of the exact same engine
+research.py            learning loop: factor analysis, weight candidates, A/B
 config.yaml            every parameter and risk limit
 bot/
   config.py            strict config loading (fails fast on bad values)
-  market_data.py       public data: klines, funding, open interest, order book
+  market_data.py       public data: klines, funding, OI, order book, positioning
   indicators.py        EMA, RSI, ATR, swing points, structure, S/R levels
   strategy.py          multi-factor confluence engine -> TradeDecision
   decision.py          the full auditable decision record
@@ -28,6 +29,7 @@ bot/
   manager.py           breakeven, ATR trailing, invalidation & liquidation guard
   trader.py            orchestrator loop, kill switch, data-outage protection
   journal.py           JSONL audit log of every decision and order
+  datastore.py         SQLite research dataset: snapshots, decisions, outcomes
   metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
 ```
 
@@ -107,6 +109,32 @@ python main.py
   `bot_state.json`; a restart resumes management, it doesn't reset limits.
 - **Audit trail**: every decision (including every NO_TRADE), risk block,
   order, stop move, exit and error is one JSON line in `journal.jsonl`.
+
+## Data & the learning loop
+
+The engine is data-hungry by design: every snapshot it takes (price, funding,
+open interest, order book depth and imbalance, long/short account ratio,
+taker buy/sell flow, BTC trend), every decision with all eleven factor votes,
+and every trade outcome is stored in `market_data.db`. The dataset grows in
+every mode — paper trading feeds it just as well as live.
+
+```bash
+python research.py stats                     # dataset size
+python research.py collect --interval 300    # keep collecting even when not trading
+python research.py factors                   # which factors actually predict wins?
+python research.py factors --write config_suggested.yaml   # bounded weight candidate
+python research.py compare --config-b config_suggested.yaml --days 60   # out-of-sample referee
+```
+
+The learning discipline, in order: **collect → measure → suggest → validate
+out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),
+require a minimum sample (20 aligned trades per factor), and are written to a
+*candidate* file — never applied automatically. `compare` backtests the
+candidate against the current config on the same data; promote it only if it
+wins on profit factor and drawdown, not just total PnL, and re-check on a
+second period. This is what separates learning from curve-fitting — the
+original prototype in this repo "learned" from its own trades in a circle,
+which is precisely the failure mode this pipeline is built to avoid.
 
 ## Expectations, honestly
 

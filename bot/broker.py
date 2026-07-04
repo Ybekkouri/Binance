@@ -325,6 +325,12 @@ class PaperBroker:
             if t["symbol"] == symbol and t["closed_ms"] >= since_ms
         )
 
+    def last_exit_reason(self, symbol: str) -> Optional[str]:
+        for t in reversed(self.state["closed"]):
+            if t["symbol"] == symbol:
+                return t["reason"]
+        return None
+
 
 def make_broker(cfg):
     return PaperBroker(cfg) if cfg.mode == "paper" else LiveBroker(cfg)
