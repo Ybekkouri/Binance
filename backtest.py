@@ -1,44 +1,41 @@
-"""Backtest the bot's strategy on historical Binance futures data.
+"""Backtest the engine on historical Binance futures data.
 
-Runs the exact same signal logic as the live bot (bot/strategy.py), with the
-same ATR stop/take-profit brackets and %-risk position sizing, and reports
-daily PnL so you can judge the "X USDT per day" goal against real history.
+Runs the SAME strategy code as the live bot (bot/strategy.py) bar by bar,
+with the same sizing, ATR brackets, partial take-profits, breakeven move,
+ATR trailing, daily/weekly risk limits, taker fees, slippage, and funding
+costs. Order book and open interest factors vote neutral in backtests
+(no historical data), which only makes the backtest MORE conservative
+than live.
 
 Usage:
-    python backtest.py --days 90 --equity 5000
-    python backtest.py --symbol ETH/USDT --timeframe 15m --days 30
+    python backtest.py --days 90 --equity 1000
+    python backtest.py --symbol ETH/USDT --days 60 --config config.yaml
 
+Strategy comparison: run once per config file and compare the reports.
 No API keys needed — public market data only.
 """
 
 import argparse
 import logging
+from datetime import datetime
 
 import ccxt
 import pandas as pd
 
-from bot.config import Config
-from bot import strategy
+from bot import metrics, strategy
+from bot.config import load_config
+from bot.decision import LONG, NO_TRADE
+from bot.indicators import atr as atr_series, ema
+from bot.market_data import MarketSnapshot, _to_df
+from bot.risk import size_position
 
-TAKER_FEE = 0.0005  # 0.05% per side, standard Binance futures taker fee
+log = logging.getLogger("backtest")
 
-
-def make_cfg(args) -> Config:
-    return Config(
-        testnet=True, api_key="", api_secret="",
-        symbol=args.symbol, timeframe=args.timeframe,
-        leverage=args.leverage, margin_mode="isolated",
-        ema_fast=20, ema_slow=50,
-        rsi_period=14, rsi_overbought=70, rsi_oversold=30,
-        atr_period=14, stop_atr_mult=1.5, take_profit_atr_mult=2.25,
-        risk_per_trade_pct=args.risk, daily_profit_target_pct=args.target_pct,
-        daily_max_loss_pct=args.max_loss_pct, max_position_notional_mult=args.leverage,
-        poll_seconds=0, state_file="",
-    )
+WINDOW = 300  # bars of context per decision, mirroring the live fetch limit
 
 
-def fetch_history(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
-    client = ccxt.binanceusdm({"enableRateLimit": True})
+# ------------------------------------------------------------ data
+def fetch_history(client, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
     tf_ms = client.parse_timeframe(timeframe) * 1000
     since = client.milliseconds() - days * 86_400_000
     rows = []
@@ -48,115 +45,264 @@ def fetch_history(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
             break
         rows.extend(batch)
         since = batch[-1][0] + tf_ms
-    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    return df.set_index("timestamp")
+    return _to_df(rows)
 
 
-def run_backtest(df: pd.DataFrame, cfg: Config, start_equity: float):
-    """Bar-by-bar simulation. Conservative assumption: if a bar touches both
-    the stop and the take-profit, the stop is filled first.
+def fetch_funding(client, symbol: str, days: int) -> pd.Series:
+    since = client.milliseconds() - days * 86_400_000
+    rows, out = [], {}
+    try:
+        rows = client.fetch_funding_rate_history(symbol, since=since, limit=1000)
+    except ccxt.BaseError as e:
+        log.warning("funding history unavailable: %s", e)
+    for r in rows:
+        out[pd.Timestamp(r["timestamp"], unit="ms", tz="UTC")] = float(r["fundingRate"])
+    return pd.Series(out).sort_index()
 
-    Daily limits are percentages of the equity at the start of each day,
-    mirroring the live RiskManager."""
-    ind = strategy.add_indicators(df, cfg)
+
+def resample(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    rule = timeframe.replace("m", "min").replace("h", "h").replace("d", "D")
+    return df.resample(rule).agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna()
+
+
+# ------------------------------------------------------------ sim risk
+class SimRisk:
+    """Mirror of the live RiskEngine counters on simulated time."""
+
+    def __init__(self, cfg, equity: float):
+        self.cfg = cfg
+        self.day = None
+        self.week = None
+        self.daily_pnl = 0.0
+        self.trades_today = 0
+        self.consecutive_losses = 0
+        self.equity_day_start = equity
+        self.equity_week_start = equity
+
+    def roll(self, ts: pd.Timestamp, equity: float):
+        day = ts.strftime("%Y-%m-%d")
+        week = f"{ts.isocalendar().year}-W{ts.isocalendar().week:02d}"
+        if day != self.day:
+            self.day, self.daily_pnl, self.trades_today = day, 0.0, 0
+            self.equity_day_start = equity
+            self.consecutive_losses = 0  # cooldown ends with the day
+        if week != self.week:
+            self.week, self.equity_week_start = week, equity
+
+    def can_open(self, equity: float) -> bool:
+        rk = self.cfg.risk
+        if self.daily_pnl <= -self.equity_day_start * rk.daily_max_loss_pct / 100:
+            return False
+        if rk.daily_profit_target_pct > 0 and \
+                self.daily_pnl >= self.equity_day_start * rk.daily_profit_target_pct / 100:
+            return False
+        if self.equity_week_start > 0 and \
+                (self.equity_week_start - equity) / self.equity_week_start * 100 \
+                >= rk.weekly_max_drawdown_pct:
+            return False
+        if self.consecutive_losses >= rk.max_consecutive_losses:
+            return False
+        if self.trades_today >= rk.max_trades_per_day:
+            return False
+        return True
+
+    def on_close(self, pnl: float):
+        self.daily_pnl += pnl
+        self.consecutive_losses = 0 if pnl > 0 else self.consecutive_losses + 1
+
+
+# ------------------------------------------------------------ engine
+def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
+                 btc_trend_lookup, funding: pd.Series, start_equity: float):
+    st, exi = cfg.strategy, cfg.exits
+    fee_pct = cfg.taker_fee_pct / 100
+    slip_pct = cfg.slippage_pct / 100
+    base_delta = df.index[1] - df.index[0]
+    trend_delta = trend_df.index[1] - trend_df.index[0]
+    trend_close_times = trend_df.index + trend_delta
+    atr_full = atr_series(df, st.atr_period)
+    bar_hours = base_delta.total_seconds() / 3600
+    # 24h rolling quote volume, approximated from base candles
+    bars_per_day = max(1, int(24 / bar_hours))
+    quote_vol = (df["volume"] * df["close"]).rolling(bars_per_day).sum()
+
     equity = start_equity
+    sim = SimRisk(cfg, equity)
+    position = None
     trades = []
-    position = None  # dict(side, entry, stop, tp, amount)
     day_pnl: dict = {}
-    day_equity_start: dict = {}
 
-    warmup = max(cfg.ema_slow, cfg.rsi_period, cfg.atr_period) + 2
-    for i in range(warmup, len(ind)):
-        bar = ind.iloc[i]
-        day = bar.name.strftime("%Y-%m-%d")
+    warmup = max(st.ema_slow, st.swing_lookback, st.breakout_lookback,
+                 st.volume_ma, st.atr_period) + 2
+
+    for i in range(warmup, len(df)):
+        bar = df.iloc[i]
+        ts = df.index[i]
+        bar_close_time = ts + base_delta
+        sim.roll(ts, equity)
+        day = ts.strftime("%Y-%m-%d")
         day_pnl.setdefault(day, 0.0)
-        day_equity_start.setdefault(day, equity)
+        a = float(atr_full.iloc[i])
 
+        # ---- manage open position ----
         if position is not None:
-            hit_stop = (bar["low"] <= position["stop"] if position["side"] == "long"
-                        else bar["high"] >= position["stop"])
-            hit_tp = (bar["high"] >= position["tp"] if position["side"] == "long"
-                      else bar["low"] <= position["tp"])
-            exit_price = position["stop"] if hit_stop else position["tp"] if hit_tp else None
-            if exit_price is not None:
-                direction = 1 if position["side"] == "long" else -1
-                gross = direction * (exit_price - position["entry"]) * position["amount"]
-                fees = (position["entry"] + exit_price) * position["amount"] * TAKER_FEE
-                pnl = gross - fees
-                equity += pnl
-                day_pnl[day] += pnl
-                trades.append({
-                    "exit_time": bar.name, "side": position["side"],
-                    "pnl": pnl, "equity": equity,
-                })
-                position = None
+            p = position
+            sign = 1 if p["side"] == "long" else -1
+            notional = p["contracts"] * float(bar["close"])
+            fr = float(funding.asof(ts)) if len(funding) else 0.0
+            if fr == fr:  # not NaN
+                cost = sign * fr * notional * bar_hours / 8
+                p["funding"] += cost
+                equity -= cost
 
-        day_target = day_equity_start[day] * cfg.daily_profit_target_pct / 100.0
-        day_max_loss = day_equity_start[day] * cfg.daily_max_loss_pct / 100.0
-        if position is None and day_pnl[day] < day_target and day_pnl[day] > -day_max_loss:
-            window = df.iloc[: i + 1]
-            sig = strategy.evaluate(window, cfg)
-            if sig is not None:
-                stop_dist = abs(sig.entry_price - sig.stop_price)
-                amount = (equity * cfg.risk_per_trade_pct / 100.0) / stop_dist
-                amount = min(
-                    amount,
-                    equity * cfg.max_position_notional_mult / sig.entry_price,
-                    equity * cfg.leverage * 0.95 / sig.entry_price,
-                )
-                if amount > 0:
-                    position = {
-                        "side": sig.side, "entry": sig.entry_price,
-                        "stop": sig.stop_price, "tp": sig.take_profit_price,
-                        "amount": amount,
-                    }
+            def fill(price, amount, reason):
+                nonlocal equity, position
+                slipped = price * (1 - sign * slip_pct)
+                gross = sign * (slipped - p["entry"]) * amount
+                fee = slipped * amount * fee_pct
+                equity += gross - fee
+                p["realized"] += gross - fee
+                p["fees"] += fee
+                p["contracts"] -= amount
+                if p["contracts"] <= 1e-12:
+                    net = p["realized"] - p["funding"]
+                    sim.on_close(net)
+                    day_pnl[day] += net
+                    trades.append({
+                        "exit_time": ts, "side": p["side"], "pnl": net,
+                        "fees": p["fees"], "funding": p["funding"],
+                        "equity": equity, "reason": reason,
+                    })
+                    position = None
 
-    daily = pd.DataFrame({
-        "pnl": pd.Series(day_pnl),
-        "target": pd.Series(day_equity_start) * cfg.daily_profit_target_pct / 100.0,
-    })
-    return pd.DataFrame(trades), daily
+            hi, lo = float(bar["high"]), float(bar["low"])
+            hit = lambda level, above: hi >= level if above else lo <= level
+            if hit(p["stop"], above=p["side"] == "short"):
+                fill(p["stop"], p["contracts"], "stop_loss")          # SL first: conservative
+            elif not p["tp1_filled"] and hit(p["tp1"], above=p["side"] == "long"):
+                fill(p["tp1"], p["tp1_amount"], "take_profit_1")
+                if position:
+                    p["tp1_filled"] = True
+            elif hit(p["tp2"], above=p["side"] == "long"):
+                fill(p["tp2"], p["contracts"], "take_profit_2")
+
+            if position is not None:
+                close = float(bar["close"])
+                r_gain = sign * (close - p["entry"]) / p["risk_dist"]
+                if not p["breakeven_done"] and r_gain >= exi.breakeven_at_r:
+                    p["stop"] = p["entry"] if sign > 0 else p["entry"]
+                    p["stop"] = p["entry"]
+                    p["breakeven_done"] = True
+                if r_gain >= exi.tp1_r:
+                    trail = close - sign * a * exi.trail_atr_mult
+                    if (trail > p["stop"]) == (sign > 0) and trail != p["stop"]:
+                        p["stop"] = trail
+            continue  # never evaluate a new entry on a bar we were in a trade
+
+        # ---- evaluate entry ----
+        if not sim.can_open(equity):
+            continue
+        n_trend = trend_close_times.searchsorted(bar_close_time, side="right")
+        if n_trend < st.trend_ema_slow + 2:
+            continue
+        snap = MarketSnapshot(
+            symbol=cfg.symbols[0],
+            candles=df.iloc[max(0, i - WINDOW):i + 1],
+            trend_candles=trend_df.iloc[max(0, n_trend - 200):n_trend],
+            last_price=float(bar["close"]),
+            quote_volume_24h=float(quote_vol.iloc[i]) if quote_vol.iloc[i] == quote_vol.iloc[i] else 0.0,
+            funding_rate=float(funding.asof(ts)) if len(funding) and funding.asof(ts) == funding.asof(ts) else None,
+            oi_change_pct=None,
+            book=None,
+            btc_trend=btc_trend_lookup(ts),
+        )
+        decision = strategy.decide(snap, cfg)
+        if decision.direction == NO_TRADE:
+            continue
+        if snap.quote_volume_24h < cfg.risk.min_quote_volume_24h:
+            continue
+
+        amount = size_position(cfg, equity, decision.entry_price,
+                               decision.stop_loss, [])
+        if amount <= 0:
+            continue
+        sign = 1 if decision.direction == LONG else -1
+        entry_fill = decision.entry_price * (1 + sign * slip_pct)
+        fee = entry_fill * amount * fee_pct
+        equity -= fee
+        sim.trades_today += 1
+        position = {
+            "side": "long" if sign > 0 else "short",
+            "contracts": amount,
+            "tp1_amount": amount * exi.tp1_fraction,
+            "entry": entry_fill,
+            "stop": decision.stop_loss,
+            "tp1": decision.take_profit_1,
+            "tp2": decision.take_profit_2,
+            "risk_dist": abs(entry_fill - decision.stop_loss),
+            "tp1_filled": exi.tp1_fraction <= 0,
+            "breakeven_done": False,
+            "fees": fee, "funding": 0.0, "realized": -fee,
+        }
+
+    trades_df = pd.DataFrame(trades)
+    daily = pd.Series(day_pnl).sort_index()
+    return trades_df, daily
 
 
+# ------------------------------------------------------------ cli
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--symbol", default="BTC/USDT")
-    parser.add_argument("--timeframe", default="15m")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--symbol", default=None, help="default: first configured symbol")
     parser.add_argument("--days", type=int, default=90)
-    parser.add_argument("--equity", type=float, default=5000)
-    parser.add_argument("--risk", type=float, default=1.0, help="%% risk per trade")
-    parser.add_argument("--leverage", type=int, default=3)
-    parser.add_argument("--target-pct", type=float, default=2.0,
-                        help="daily profit target as %% of equity")
-    parser.add_argument("--max-loss-pct", type=float, default=1.5,
-                        help="daily max loss as %% of equity")
+    parser.add_argument("--equity", type=float, default=1000)
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cfg = make_cfg(args)
+    cfg = load_config(args.config, require_keys=False)
+    symbol = args.symbol or cfg.symbols[0]
+    cfg.symbols = [symbol]
 
-    print(f"Fetching {args.days} days of {args.symbol} {args.timeframe} candles...")
-    df = fetch_history(args.symbol, args.timeframe, args.days)
-    print(f"Got {len(df)} candles. Running backtest with {args.equity:.0f} USDT...")
+    client = ccxt.binanceusdm({"enableRateLimit": True})
+    print(f"Fetching {args.days} days of {symbol} {cfg.timeframe} data...")
+    df = fetch_history(client, symbol, cfg.timeframe, args.days)
+    trend_df = resample(df, cfg.trend_timeframe)
+    funding = fetch_funding(client, symbol, args.days)
 
-    trades, daily = run_backtest(df, cfg, args.equity)
-    if trades.empty:
-        print("No trades were generated over this period.")
-        return
+    if cfg.strategy.btc_filter and symbol != "BTC/USDT":
+        btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, args.days),
+                       cfg.trend_timeframe)
+        fast = ema(btc["close"], cfg.strategy.trend_ema_fast)
+        slow = ema(btc["close"], cfg.strategy.trend_ema_slow)
+        sig = (fast > slow).astype(int) - (fast < slow).astype(int)
 
-    wins = trades[trades.pnl > 0]
-    print("\n===== RESULTS =====")
-    print(f"Trades:            {len(trades)}")
-    print(f"Win rate:          {len(wins) / len(trades) * 100:.1f}%")
-    print(f"Total PnL:         {trades.pnl.sum():+.2f} USDT")
-    print(f"Final equity:      {trades.equity.iloc[-1]:.2f} USDT")
-    print(f"Best day:          {daily.pnl.max():+.2f} USDT")
-    print(f"Worst day:         {daily.pnl.min():+.2f} USDT")
-    print(f"Average day:       {daily.pnl.mean():+.2f} USDT")
-    print(f"Target-hit days:   {(daily.pnl >= daily.target).sum()} / {len(daily)} "
-          f"(target = +{args.target_pct:.1f}% of that day's equity)")
-    print(f"Losing days:       {(daily.pnl < 0).sum()} / {len(daily)}")
+        def btc_trend_lookup(ts):
+            v = sig.asof(ts)
+            return int(v) if v == v else 0
+    else:
+        def btc_trend_lookup(ts):
+            return 0
+
+    print(f"Got {len(df)} candles. Simulating with {args.equity:.0f} USDT...")
+    trades, daily = run_backtest(cfg, df, trend_df, btc_trend_lookup,
+                                 funding, args.equity)
+
+    # include flat days so Sharpe/Sortino aren't overstated
+    if len(daily):
+        all_days = pd.date_range(daily.index[0], daily.index[-1], freq="D")
+        daily = daily.reindex([d.strftime("%Y-%m-%d") for d in all_days], fill_value=0.0)
+
+    m = metrics.compute(trades, daily, args.equity)
+    print()
+    print(metrics.format_report(m, daily))
+    if m.get("trades", 0):
+        by_reason = trades.groupby("reason").pnl.agg(["count", "sum"])
+        print("\nExits by reason:")
+        print(by_reason.to_string())
 
 
 if __name__ == "__main__":

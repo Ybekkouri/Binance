@@ -1,5 +1,8 @@
 .env
 bot_state.json
+paper_state.json
+journal.jsonl
+KILL
 __pycache__/
 *.pyc
 .venv/

@@ -1,100 +1,117 @@
-# Binance Futures Trading Bot
+# Binance Futures Trading Engine
 
-A trend-following bot for Binance USDⓈ-M futures with strict risk management,
-built around a **daily profit target** (default: +2% of equity) and a **daily
-loss cap** (default: −1.5% of equity). All limits are ratios of account
-equity, so they adapt automatically as the account grows or shrinks — with
-1,000 USDT the bot stops for the day at +20 or −15; with 2,500 USDT at +50 or
-−37.5. When either limit is hit, the bot stops opening positions until the
-next UTC day.
+A risk-first trading engine for Binance USDⓈ-M perpetual futures. Its primary
+goal is **capital preservation**: it trades only when multiple independent
+factors align and every risk control is satisfied. The default action is
+**NO TRADE**.
 
-> ⚠️ **Read this first.** Futures trading with leverage can lose money faster
-> than you can react, up to your entire margin. No strategy — this one
-> included — can *guarantee* 50 USDT/day. The daily target is a stopping rule,
-> not a promise. Always start on the testnet, backtest first, and never trade
-> money you can't afford to lose.
+> ⚠️ **Read this first.** Leveraged futures can lose money faster than you can
+> react. No strategy guarantees profits, and every limit in this engine is a
+> stopping rule, not a promise of returns. Start in paper mode, then testnet,
+> and only go live with money you can afford to lose. Use API keys with
+> futures permission only — **never enable withdrawals**.
 
-## How it works
+## Architecture
 
-- **Strategy** (`bot/strategy.py`): EMA(20/50) crossover with an RSI filter,
-  evaluated on closed 15-minute candles. Long on a bullish crossover, short on
-  a bearish one.
-- **Brackets**: every entry immediately gets a reduce-only stop-loss
-  (1.5 × ATR) and take-profit (2.25 × ATR) on the exchange, so the position is
-  protected even if the bot crashes or loses connectivity. If bracket
-  placement fails, the position is closed on the spot.
-- **Position sizing** (`bot/risk.py`): each trade risks 1% of account equity
-  (distance to stop), capped by leverage and a max notional.
-- **Daily discipline**: realized PnL (fees included) is tracked per UTC day
-  and persisted to `bot_state.json`, so restarts don't reset your limits.
-  The day's target and loss cap are computed from an equity snapshot taken at
-  the start of the day, so the goalposts don't move intraday.
+```
+main.py                entry point (+ --close-all manual override)
+backtest.py            historical simulation of the exact same engine
+config.yaml            every parameter and risk limit
+bot/
+  config.py            strict config loading (fails fast on bad values)
+  market_data.py       public data: klines, funding, open interest, order book
+  indicators.py        EMA, RSI, ATR, swing points, structure, S/R levels
+  strategy.py          multi-factor confluence engine -> TradeDecision
+  decision.py          the full auditable decision record
+  risk.py              portfolio-level risk engine + position sizing
+  broker.py            LiveBroker (ccxt, testnet/live) + PaperBroker (simulated)
+  manager.py           breakeven, ATR trailing, invalidation & liquidation guard
+  trader.py            orchestrator loop, kill switch, data-outage protection
+  journal.py           JSONL audit log of every decision and order
+  metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
+```
+
+## How a trade happens (or doesn't)
+
+1. **Snapshot** — closed candles on two timeframes, funding rate, open
+   interest change, order book depth/spread, 24h volume, BTC trend.
+2. **Strategy** — eleven weighted factors vote long/short/neutral:
+   higher-timeframe trend, execution trend, market structure, momentum,
+   breakout, volume expansion, room to S/R, overextension guard, funding,
+   open interest, book imbalance. A trade needs `min_confidence` (0.60)
+   **and** `min_aligned_factors` (4) agreeing, then must survive hard gates
+   (volatility band, BTC direction filter for alts, funding extremes) and the
+   minimum risk/reward (1.5 blended across targets).
+3. **Risk engine** — daily loss cap, daily profit target, weekly drawdown
+   halt, consecutive-loss cooldown, trades-per-day cap, max open positions,
+   per-symbol and total exposure caps, spread/liquidity/book-depth gates,
+   margin sufficiency. *Any* failure = NO TRADE, with the reason journaled.
+4. **Execution** — market entry sized so the stop costs `risk_per_trade_pct`
+   (0.5%) of equity, then exchange-side brackets immediately: close-position
+   stop-loss, partial take-profit at 1R (50%), final target at 2.5R. If
+   bracket placement fails, the position is flattened on the spot.
+5. **Management** — stop to breakeven at +1R, ATR trailing after TP1,
+   early exit on a confident opposing signal, liquidation-distance guard,
+   PnL settled into the risk counters (fees and funding included).
+
+All limits are **ratios of equity**, so they scale with the account.
+No martingale, no averaging down, no revenge trading — the engine refuses
+duplicate positions and cools off after consecutive losses.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # then fill in your API keys
+cp .env.example .env    # only needed for testnet/live modes
 ```
 
-For the testnet, create keys at <https://testnet.binancefuture.com> — it's
-free play money. For live trading, create API keys in your Binance account
-with futures permission only (never enable withdrawals) and restrict them to
-your IP.
+## The safe path to live
 
-## Usage
-
-**1. Backtest the strategy first** (no keys needed):
+**1. Backtest** (no keys needed):
 
 ```bash
-python backtest.py --days 90 --equity 5000
+python backtest.py --days 90 --equity 1000
+python backtest.py --symbol ETH/USDT --days 60
 ```
 
-This replays the exact live-bot logic over historical candles and prints
-daily PnL stats — including how many days would actually have reached +50.
+Reports win rate, profit factor, expectancy, Sharpe, Sortino, max drawdown,
+fees, funding and per-day PnL. Order book and open interest factors vote
+neutral in backtests (no historical data), which only makes backtests more
+conservative than live. To compare strategies, copy `config.yaml`, change
+parameters, and run with `--config variant.yaml`.
 
-**2. Run on the testnet** (`testnet: true` in `config.yaml`, the default):
+**2. Paper trade** (`mode: paper`) — live market data, simulated fills with
+fees and slippage, no keys, no risk. State persists in `paper_state.json`.
+
+**3. Testnet** (`mode: testnet`, the default) — real order flow against
+Binance's futures testnet (free keys at <https://testnet.binancefuture.com>).
+
+**4. Live** (`mode: live`) — requires typing `live` at startup. Restrict API
+keys to futures trading + your IP, withdrawals disabled.
+
+Run any mode with:
 
 ```bash
 python main.py
 ```
 
-Let it run for at least a couple of weeks and check that behavior and PnL
-match your backtest expectations.
+## Safety controls
 
-**3. Go live** only after that: set `testnet: false` in `config.yaml`. The bot
-will ask for confirmation on startup.
+- **Kill switch**: create a file named `KILL` in the working directory — the
+  bot cancels all orders, flattens all positions (configurable), and stops.
+- **Manual override**: `python main.py --close-all` flattens everything.
+- **Crash safety**: stops and targets live on the exchange, not in the bot.
+- **Data outage**: repeated data failures block new entries; open positions
+  stay protected by their exchange-side brackets.
+- **Restart safety**: risk counters and managed positions persist to
+  `bot_state.json`; a restart resumes management, it doesn't reset limits.
+- **Audit trail**: every decision (including every NO_TRADE), risk block,
+  order, stop move, exit and error is one JSON line in `journal.jsonl`.
 
-## Configuration
+## Expectations, honestly
 
-Everything lives in `config.yaml`: symbol, timeframe, leverage, strategy
-periods, risk per trade, and the daily target/loss limits. Secrets stay in
-`.env` and are never committed.
-
-## The math behind the daily target
-
-Risking 1% per trade with a 1.5R take-profit means each winner makes about
-1.5% of equity before fees, and the strategy fires roughly 1–3 signals a day
-on 15-minute candles. That's why the default target is **+2% of equity per
-day** — one or two net winners reach it, and the bot banks the day instead of
-giving profits back. In absolute terms the target scales with the account:
-about +20 USDT/day at 1,000 equity, and +50 USDT/day once equity reaches
-~2,500 (through compounding or deposits). Forcing bigger absolute numbers out
-of a small account by raising leverage or risk-per-trade is how accounts blow
-up. Run the backtest with your actual equity to see realistic numbers:
-even +2%/day is an aggressive goal that no strategy sustains every day.
-
-## Project layout
-
-```
-main.py            # entry point
-backtest.py        # historical simulation of the same strategy
-config.yaml        # all tunable parameters
-bot/
-  config.py        # config + secrets loading
-  exchange.py      # ccxt Binance futures wrapper (testnet-aware)
-  strategy.py      # EMA/RSI/ATR signal logic
-  risk.py          # position sizing + daily limits
-  trader.py        # main loop / state machine
-my_bot.py.txt      # old uploaded prototype (kept for reference; not used)
-```
+The engine's discipline controls *losses*; profits depend on market
+conditions, and there will be losing days and quiet weeks where it simply
+refuses to trade. The daily profit target (default +2% of equity) and loss
+cap (−1.5%) are when it *stops for the day*, not what it earns. Judge it on
+the backtest and a long paper/testnet run — not on hope.

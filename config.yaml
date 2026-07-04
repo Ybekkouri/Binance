@@ -1,39 +1,100 @@
 # ============================================================
-# Binance USDS-M Futures bot configuration
+# Binance USDS-M Futures trading engine configuration
+#
+# Philosophy: risk-first. Every limit in here is a hard gate —
+# if any check fails, the correct action is NO TRADE.
 # ============================================================
 
-exchange:
-  # ALWAYS start with testnet: true. Only flip to false once the bot
-  # has run profitably on the testnet for a while and you understand
-  # exactly what it does with real money.
-  testnet: true
+# testnet -> Binance futures testnet (fake money, needs testnet keys)
+# paper   -> simulated fills on live market data (no keys needed)
+# live    -> real money (requires typed confirmation at startup)
+mode: testnet
 
 trading:
-  symbol: BTC/USDT
-  timeframe: 15m          # candle size the strategy runs on
-  leverage: 3             # keep this low; leverage amplifies losses too
-  margin_mode: isolated   # isolated caps the damage to the position margin
+  symbols: [BTC/USDT, ETH/USDT]
+  timeframe: 15m           # execution timeframe
+  trend_timeframe: 1h      # higher timeframe for trend context
+  leverage: 3
+  margin_mode: isolated    # isolated caps damage to the position's margin
 
 strategy:
+  # Confluence: a trade needs BOTH enough weighted confidence and enough
+  # independent factors agreeing. Anything less is NO_TRADE.
+  min_confidence: 0.60         # 0..1 weighted alignment score
+  min_aligned_factors: 4       # independent factors agreeing with direction
+
+  # Factor weights (0 disables a factor)
+  weights:
+    trend_htf: 2.0             # higher-timeframe trend (most important)
+    trend_ltf: 1.5             # execution-timeframe trend
+    structure: 1.5             # higher-highs/lows market structure
+    momentum: 1.0              # RSI regime
+    breakout: 1.0              # range breakout confirmation
+    volume: 1.0                # volume expansion behind the move
+    sr_room: 1.0               # room to nearest S/R level vs stop distance
+    mean_reversion: 1.0        # overextension guard (votes against chasing)
+    funding: 0.5               # crowded-side penalty from funding rate
+    open_interest: 0.5         # OI confirming the move
+    book_imbalance: 0.5        # top-of-book bid/ask depth imbalance
+
+  # Indicator parameters
   ema_fast: 20
   ema_slow: 50
+  trend_ema_fast: 20           # on trend_timeframe
+  trend_ema_slow: 50
   rsi_period: 14
-  rsi_overbought: 70      # don't open longs above this
-  rsi_oversold: 30        # don't open shorts below this
   atr_period: 14
-  stop_atr_mult: 1.5      # stop-loss distance = 1.5 x ATR
-  take_profit_atr_mult: 2.25  # take-profit distance = 2.25 x ATR (1.5R)
+  breakout_lookback: 20        # bars defining the range to break
+  swing_lookback: 60           # bars scanned for swings / structure / S-R
+  swing_window: 3              # bars each side to confirm a swing point
+  volume_ma: 20
+  volume_expansion: 1.3        # last volume >= this x average
+  extension_atr_max: 3.0       # price further than this from slow EMA = chasing
+  book_depth_levels: 10        # order book levels for imbalance
+  book_imbalance_ratio: 1.3    # bid/ask depth ratio to count as a vote
 
-# All risk limits are percentages of account equity, so they adapt
-# automatically as the account grows or shrinks. Daily limits are computed
-# from equity at the start of each UTC day (e.g. with 1000 USDT: stop for
-# the day at +20 or -15; with 2500 USDT: +50 or -37.5).
+  # Hard gates (any failure vetoes the trade regardless of score)
+  min_atr_pct: 0.10            # ATR as % of price; below = dead market
+  max_atr_pct: 3.00            # above = chaos, stand aside
+  max_funding_against: 0.0010  # skip if paying > 0.10% funding against us
+  btc_filter: true             # alts may only trade with BTC's HTF trend
+
+exits:
+  stop_atr_mult: 1.5           # initial stop distance in ATRs
+  tp1_r: 1.0                   # first target at 1R...
+  tp1_fraction: 0.5            # ...closing 50% of the position
+  tp2_r: 2.5                   # final target
+  breakeven_at_r: 1.0          # move stop to entry once +1R reached
+  trail_atr_mult: 2.0          # then trail the rest by 2 ATRs
+  trail_min_step_pct: 0.05     # only replace the stop if it improves >= 0.05%
+  exit_on_opposing_signal: true  # close early if a confident opposite signal fires
+
+# All percentages are of account equity, so limits scale with capital.
 risk:
-  risk_per_trade_pct: 1.0        # % of equity risked per trade (distance to stop)
-  daily_profit_target_pct: 2.0   # stop trading for the day once up this % of equity
-  daily_max_loss_pct: 1.5        # stop trading for the day once down this % of equity
-  max_position_notional_mult: 3  # position notional <= equity x this (keep <= leverage)
+  risk_per_trade_pct: 0.5      # equity lost if the initial stop is hit
+  max_leverage: 5
+  max_open_positions: 2
+  max_symbol_exposure_mult: 1.0   # per-symbol notional <= equity x this
+  max_total_exposure_mult: 2.0    # sum of notionals <= equity x this
+  daily_max_loss_pct: 1.5      # realized; stop opening trades for the day
+  daily_profit_target_pct: 2.0 # bank the day when reached (0 disables)
+  weekly_max_drawdown_pct: 4.0 # from week-start equity; halts for the week
+  max_consecutive_losses: 3    # halts for the day after this many in a row
+  max_trades_per_day: 6
+  min_risk_reward: 1.5         # blended RR across TP1/TP2 must beat this
+  max_spread_pct: 0.05         # bid/ask spread gate
+  min_quote_volume_24h: 100000000  # USDT; liquidity gate per symbol
+  min_book_depth_mult: 20      # top-of-book depth >= order size x this
+
+execution:
+  slippage_pct: 0.02           # assumed slippage per market order (sizing + backtest)
+  taker_fee_pct: 0.05          # Binance USDS-M taker fee
 
 bot:
-  poll_seconds: 30          # how often to check for candle close / position state
-  state_file: bot_state.json
+  poll_seconds: 30
+  state_file: bot_state.json       # risk counters + managed positions
+  paper_state_file: paper_state.json
+  journal_file: journal.jsonl      # structured audit log of every decision
+  kill_file: KILL                  # touch this file to trigger emergency stop
+  close_positions_on_kill: true    # kill switch also flattens all positions
+  max_stale_data_seconds: 180      # halt new entries if data older than this
