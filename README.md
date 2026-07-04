@@ -31,6 +31,7 @@ bot/
   journal.py           JSONL audit log of every decision and order
   datastore.py         SQLite research dataset: snapshots, decisions, outcomes
   analysis.py          the complete statistical analysis over the dataset
+  history.py           deep multi-year history: phases, regimes, drawdowns
   metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
 ```
 
@@ -189,6 +190,36 @@ arrives):
 The report warns about small samples and about multiple-comparison false
 positives (test enough metrics at 95% and one will star by chance) — trust
 only effects that stay significant as the dataset grows.
+
+### Deep history: know the pair before trading it regularly
+
+```bash
+python research.py history --symbol BTC/USDT            # spot = longest history
+python research.py history --symbol ETH/USDT --source futures
+```
+
+Fetches the **maximum daily history Binance has** for the pair (spot reaches
+back to 2017 for the majors; futures exist since late 2019 — nobody has 10
+years of a pair that hasn't existed that long), caches it incrementally in
+the datastore, and dissects the pair's character:
+
+- **Market phases** — bull/bear segmentation with dates, durations, returns,
+  and the fraction of life spent in each
+- **Yearly breakdown** — return, annualized volatility, max drawdown,
+  best/worst day, per calendar year
+- **Regimes** — trending/ranging/volatile day classification plus the full
+  transition matrix: whether today's regime predicts tomorrow's. Regime
+  persistence is the empirical justification (or refutation) of
+  trend-following on this pair
+- **Seasonality** — monthly and weekday tendencies, significance-tested
+  (and honestly labeled: unstarred seasonality is folklore)
+- **Volatility anatomy** — extreme-day frequencies (±3/5/10%), clustering,
+  worst/best days ever, and what a 3-sigma day does to leveraged margin
+- **Drawdowns** — the five worst: depth, duration, time to recovery
+
+Use it to answer: does trend-following structurally fit this pair, what
+leverage do its tail days permit, and what drawdowns must the risk caps
+survive. Then validate the strategy itself on recent data with `backtest.py`.
 
 The learning discipline, in order: **collect → measure → suggest → validate
 out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),

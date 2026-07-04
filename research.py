@@ -23,6 +23,12 @@ knowledge — WITHOUT ever touching the live configuration by itself:
       rates and PnL, plus bounded weight suggestions once there's enough
       sample. --write saves a candidate config; it is NEVER auto-applied.
 
+  python research.py history --symbol BTC/USDT [--source spot|futures] [--out f.txt]
+      Deep history for a pair you intend to trade regularly: fetches the
+      MAXIMUM daily history Binance has (spot reaches furthest back),
+      caches it, and dissects it — bull/bear phases, yearly breakdown,
+      regime persistence, seasonality, volatility anatomy, top drawdowns.
+
   python research.py compare --config-b config_suggested.yaml [--days 60]
       Out-of-sample referee: backtests the current config vs the candidate
       on the same data. Only promote the candidate if it wins here.
@@ -220,6 +226,22 @@ def cmd_stats(args) -> None:
     print(json.dumps(store.counts(), indent=2))
 
 
+def cmd_history(args) -> None:
+    from bot import history
+
+    cfg = load_config(args.config, require_keys=False)
+    store = DataStore(cfg.datastore_file)
+    print(f"Fetching maximum available {args.source} history for "
+          f"{args.symbol} (cached incrementally; first run takes a minute)...")
+    df = history.fetch_daily_history(store.conn, args.symbol, args.source)
+    text = history.full_history_report(df, args.symbol, args.source)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(text + "\n")
+        print(f"\nReport written to {args.out}")
+
+
 def cmd_report(args) -> None:
     cfg = load_config(args.config, require_keys=False)
     store = DataStore(cfg.datastore_file)
@@ -245,6 +267,12 @@ def main() -> None:
     p.add_argument("--source", choices=["all", "real", "shadow"], default="all")
     p.add_argument("--out", default=None, help="also write the report to a file")
 
+    p = sub.add_parser("history", help="deep history analysis for one pair")
+    p.add_argument("--symbol", default="BTC/USDT")
+    p.add_argument("--source", choices=["spot", "futures"], default="spot",
+                   help="spot has the longest history; futures since ~2019")
+    p.add_argument("--out", default=None, help="also write the report to a file")
+
     p = sub.add_parser("collect", help="standalone snapshot collector")
     p.add_argument("--interval", type=int, default=300, help="seconds between rounds")
 
@@ -265,7 +293,8 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     {"stats": cmd_stats, "collect": cmd_collect, "report": cmd_report,
-     "factors": cmd_factors, "compare": cmd_compare}[args.command](args)
+     "history": cmd_history, "factors": cmd_factors,
+     "compare": cmd_compare}[args.command](args)
 
 
 if __name__ == "__main__":
