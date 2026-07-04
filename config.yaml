@@ -102,6 +102,13 @@ execution:
   slippage_pct: 0.02           # assumed slippage per market order (sizing + backtest)
   taker_fee_pct: 0.05          # Binance USDS-M taker fee
 
+# Telegram: the bot messages your phone (startup, trades, daily halts,
+# outages, shutdown) and obeys /status /kill /help from the configured chat.
+# Secrets go in .env: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+telegram:
+  enabled: true
+  notify_shadow: false   # also message about virtual shadow-track trades
+
 bot:
   poll_seconds: 30
   state_file: bot_state.json       # risk counters + managed positions

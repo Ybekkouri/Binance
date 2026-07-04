@@ -11,6 +11,7 @@ account, and stops.
 
 import argparse
 import logging
+import os
 
 from bot.broker import PaperBroker, make_broker
 from bot.config import load_config
@@ -18,6 +19,7 @@ from bot.datastore import DataStore
 from bot.journal import Journal
 from bot.manager import TradeManager
 from bot.market_data import MarketData
+from bot.notify import make_notifier
 from bot.risk import RiskEngine
 from bot.trader import Track, Trader
 
@@ -36,12 +38,15 @@ def main() -> None:
 
     cfg = load_config(args.config)
     if cfg.mode == "live" and not args.close_all:
-        answer = input(
-            "mode: live — this trades REAL money on Binance Futures.\n"
-            "Type 'live' to confirm: "
-        )
-        if answer.strip().lower() != "live":
-            raise SystemExit("Aborted.")
+        # Headless servers (systemd) can't type: they must set
+        # BOT_CONFIRM_LIVE=yes explicitly to run live without a prompt.
+        if os.environ.get("BOT_CONFIRM_LIVE") != "yes":
+            answer = input(
+                "mode: live — this trades REAL money on Binance Futures.\n"
+                "Type 'live' to confirm: "
+            )
+            if answer.strip().lower() != "live":
+                raise SystemExit("Aborted.")
 
     broker = make_broker(cfg)
     if args.close_all:
@@ -53,12 +58,14 @@ def main() -> None:
 
     journal = Journal(cfg.journal_file)
     datastore = DataStore(cfg.datastore_file)
+    notifier = make_notifier(cfg)
 
     # Real track: the strict engine on the configured broker.
     risk = RiskEngine(cfg)
-    manager = TradeManager(cfg, broker, risk, journal, datastore=datastore)
+    manager = TradeManager(cfg, broker, risk, journal, datastore=datastore,
+                           notifier=notifier)
     real = Track("real", cfg, broker, risk, manager, journal,
-                 datastore=datastore)
+                 datastore=datastore, notifier=notifier)
 
     # Shadow track: the identical pipeline, relaxed thresholds, virtual money.
     shadow = None
@@ -67,14 +74,16 @@ def main() -> None:
                                 start_balance=cfg.shadow.start_balance)
         sh_risk = RiskEngine(cfg, state_file=cfg.shadow.risk_state_file)
         sh_manager = TradeManager(cfg, sh_broker, sh_risk, journal,
-                                  datastore=datastore, track="shadow")
+                                  datastore=datastore, track="shadow",
+                                  notifier=notifier)
         shadow = Track("shadow", cfg, sh_broker, sh_risk, sh_manager, journal,
                        datastore=datastore,
                        min_confidence=cfg.shadow.min_confidence,
-                       min_aligned_factors=cfg.shadow.min_aligned_factors)
+                       min_aligned_factors=cfg.shadow.min_aligned_factors,
+                       notifier=notifier)
 
     trader = Trader(cfg, MarketData(cfg), real, journal,
-                    datastore=datastore, shadow=shadow)
+                    datastore=datastore, shadow=shadow, notifier=notifier)
     trader.run()
 
 

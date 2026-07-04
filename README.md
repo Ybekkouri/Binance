@@ -74,6 +74,18 @@ pip install -r requirements.txt
 cp .env.example .env    # only needed for testnet/live modes
 ```
 
+**Running it 24/7 with your phone as the dashboard:** the bot needs a
+machine that's always on — a $4–6/month cloud server is the right tool, and
+[docs/VPS_SETUP.md](docs/VPS_SETUP.md) walks a complete beginner from
+renting one to a self-restarting bot in ~30 minutes.
+
+**Telegram**: with `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`
+(guide in the same doc), the bot messages your phone on startup, every real
+trade opened/closed, daily target/loss halts, data outages, and shutdown —
+and answers commands from your chat: `/status` (positions, equity, today's
+PnL), `/kill` (emergency stop from anywhere), `/help`. Only your chat id is
+obeyed; a Telegram outage can silence messages but never affect trading.
+
 ## The safe path to live
 
 **1. Backtest** (no keys needed):

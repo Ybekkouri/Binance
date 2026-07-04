@@ -106,6 +106,11 @@ class Config:
     close_positions_on_kill: bool = True
     max_stale_data_seconds: int = 180
     datastore_file: str = "market_data.db"
+    # telegram
+    telegram_enabled: bool = False
+    telegram_notify_shadow: bool = False
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
 
 
 def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
@@ -131,6 +136,7 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
         raw["execution"], raw["bot"],
     )
     sh = raw.get("shadow", {})
+    tg = raw.get("telegram", {})
     cfg = Config(
         mode=mode,
         api_key=api_key,
@@ -207,6 +213,10 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
         close_positions_on_kill=bool(bt["close_positions_on_kill"]),
         max_stale_data_seconds=int(bt["max_stale_data_seconds"]),
         datastore_file=bt.get("datastore_file", "market_data.db"),
+        telegram_enabled=bool(tg.get("enabled", False)),
+        telegram_notify_shadow=bool(tg.get("notify_shadow", False)),
+        telegram_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
     )
     if cfg.leverage > cfg.risk.max_leverage:
         raise SystemExit(

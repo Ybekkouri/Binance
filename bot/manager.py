@@ -27,7 +27,7 @@ LIQ_ATR_BUFFER = 3.0  # flatten if liquidation is within this many ATRs
 
 class TradeManager:
     def __init__(self, cfg, broker, risk, journal, datastore=None,
-                 track: str = "real"):
+                 track: str = "real", notifier=None):
         self.cfg = cfg
         self.broker = broker
         self.risk = risk
@@ -35,6 +35,7 @@ class TradeManager:
         self.datastore = datastore
         self.track = track
         self.is_shadow = track != "real"
+        self.notifier = notifier
 
     def on_entry(self, decision, amount: float, equity: float,
                  decision_id=None) -> None:
@@ -159,3 +160,36 @@ class TradeManager:
         log.info("[%s] %s closed (%s): %+.2f USDT | today %+.2f | equity %.2f",
                  self.track, symbol, reason, pnl,
                  self.risk.state.daily_pnl, equity)
+        self._notify_close(symbol, pnl, reason, equity)
+
+    def _notify_close(self, symbol: str, pnl: float, reason: str,
+                      equity: float) -> None:
+        if self.notifier is None or (
+                self.is_shadow and not self.cfg.telegram_notify_shadow):
+            return
+        tag = " [shadow]" if self.is_shadow else ""
+        emoji = "✅" if pnl > 0 else "🔻"
+        state = self.risk.state
+        self.notifier.send(
+            f"{emoji} Closed {symbol}{tag}: {pnl:+.2f} USDT ({reason})\n"
+            f"today {state.daily_pnl:+.2f} over {state.trades_today} trade(s) "
+            f"| equity {equity:.2f}")
+        # one-time daily halt alerts
+        base = state.equity_day_start
+        rk = self.cfg.risk
+        if base > 0 and rk.daily_profit_target_pct > 0 and \
+                state.daily_pnl >= base * rk.daily_profit_target_pct / 100:
+            self.notifier.once(
+                f"{self.track}-target-{state.date}",
+                f"🎯 Daily profit target reached{tag} "
+                f"({state.daily_pnl:+.2f} USDT). Done for the day.")
+        if base > 0 and state.daily_pnl <= -base * rk.daily_max_loss_pct / 100:
+            self.notifier.once(
+                f"{self.track}-maxloss-{state.date}",
+                f"🛑 Daily loss limit hit{tag} ({state.daily_pnl:+.2f} USDT). "
+                "No more trades until tomorrow (UTC).")
+        if state.consecutive_losses >= rk.max_consecutive_losses:
+            self.notifier.once(
+                f"{self.track}-streak-{state.date}",
+                f"⏸️ {state.consecutive_losses} consecutive losses{tag} — "
+                "cooling off for the rest of the day.")

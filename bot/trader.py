@@ -34,7 +34,8 @@ class Track:
     management -> settlement. Instantiated once for real, once for shadow."""
 
     def __init__(self, name, cfg, broker, risk, manager, journal,
-                 datastore=None, min_confidence=None, min_aligned_factors=None):
+                 datastore=None, min_confidence=None, min_aligned_factors=None,
+                 notifier=None):
         self.name = name
         self.is_shadow = name != "real"
         self.cfg = cfg
@@ -45,6 +46,7 @@ class Track:
         self.datastore = datastore
         self.min_confidence = min_confidence
         self.min_aligned_factors = min_aligned_factors
+        self.notifier = notifier
         self.last_eval_candle: dict = {}
 
     def process(self, snap, snapshot_id=None) -> None:
@@ -143,6 +145,16 @@ class Track:
                 self.datastore.mark_executed(decision_id)
             self.manager.on_entry(decision, amount, equity,
                                   decision_id=decision_id)
+            if self.notifier is not None and (
+                    not self.is_shadow or self.cfg.telegram_notify_shadow):
+                tag = "" if not self.is_shadow else " [shadow]"
+                self.notifier.send(
+                    f"📈 Opened {decision.direction} {symbol}{tag}\n"
+                    f"size {amount} @ ~{decision.entry_price:.2f}\n"
+                    f"stop {decision.stop_loss:.2f} | "
+                    f"TP1 {decision.take_profit_1:.2f} | "
+                    f"TP2 {decision.take_profit_2:.2f}\n"
+                    f"confidence {decision.confidence:.2f}, RR {decision.risk_reward:.1f}")
         except (ccxt.BaseError, RuntimeError) as e:
             self.journal.error("execution", f"[{self.name}] {symbol}: {e}")
             if not self.is_shadow:
@@ -152,13 +164,15 @@ class Track:
 
 class Trader:
     def __init__(self, cfg, market, real: Track, journal, datastore=None,
-                 shadow: Track = None):
+                 shadow: Track = None, notifier=None):
+        from .notify import NullNotifier
         self.cfg = cfg
         self.market = market
         self.real = real
         self.shadow = shadow
         self.journal = journal
         self.datastore = datastore
+        self.notifier = notifier or NullNotifier()
         self.last_snap_candle: dict = {}
         self.data_failures = 0
 
@@ -175,6 +189,13 @@ class Trader:
             self.cfg.risk.weekly_max_drawdown_pct,
             "on" if self.shadow else "off",
         )
+        self.notifier.send(
+            f"🤖 Engine started ({self.cfg.mode})\n"
+            f"{', '.join(self.cfg.symbols)} on {self.cfg.timeframe}\n"
+            f"risk {self.cfg.risk.risk_per_trade_pct}%/trade, daily "
+            f"-{self.cfg.risk.daily_max_loss_pct}%/+"
+            f"{self.cfg.risk.daily_profit_target_pct}%\n"
+            f"Commands: /status /kill /help")
         try:
             while True:
                 if self._kill_requested():
@@ -186,6 +207,7 @@ class Trader:
             self._shutdown("keyboard interrupt")
 
     def tick(self) -> None:
+        self._handle_commands()
         try:
             btc_trend = self.market.btc_trend()
             self.data_failures = 0
@@ -220,6 +242,44 @@ class Trader:
         if self.shadow is not None:
             self.shadow.process(snap, snapshot_id)
 
+    # ------------------------------------------------------------ telegram
+    def _handle_commands(self) -> None:
+        for cmd in self.notifier.poll_commands():
+            log.info("Telegram command: %s", cmd)
+            self.journal.write("telegram_command", command=cmd)
+            if cmd == "/kill":
+                with open(self.cfg.kill_file, "w") as f:
+                    f.write("telegram /kill\n")
+                self.notifier.send("🛑 Kill switch activated — cancelling "
+                                   "orders and shutting down within one cycle.")
+            elif cmd == "/status":
+                self.notifier.send(self._status_text())
+            elif cmd == "/help":
+                self.notifier.send(
+                    "/status — positions, equity, today's PnL\n"
+                    "/kill — emergency stop: cancel orders, flatten, shut down\n"
+                    "/help — this message")
+
+    def _status_text(self) -> str:
+        lines = [f"📊 Status ({self.cfg.mode})"]
+        for track in filter(None, [self.real, self.shadow]):
+            try:
+                equity = track.broker.equity_usdt()
+                positions = track.broker.open_positions()
+                track.risk.roll(equity)
+                lines.append(
+                    f"\n[{track.name}] equity {equity:.2f} USDT | today "
+                    f"{track.risk.state.daily_pnl:+.2f} over "
+                    f"{track.risk.state.trades_today} trade(s)")
+                for p in positions:
+                    lines.append(f"  {p['side']} {p['symbol']} "
+                                 f"{p['contracts']} @ {p['entry_price']:.2f}")
+                if not positions:
+                    lines.append("  no open positions")
+            except Exception as e:      # noqa: BLE001 — status must not crash
+                lines.append(f"\n[{track.name}] status unavailable: {e}")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------ safety
     def _kill_requested(self) -> bool:
         return os.path.isfile(self.cfg.kill_file)
@@ -237,14 +297,25 @@ class Trader:
                             "(Shadow positions are virtual and persist.)")
         except ccxt.BaseError:
             log.exception("Error during emergency shutdown — check the exchange!")
+            self.notifier.send("⚠️ Error during emergency shutdown — CHECK "
+                               "THE EXCHANGE MANUALLY for open positions!")
         if os.path.isfile(self.cfg.kill_file):
             os.remove(self.cfg.kill_file)
+        self.notifier.send(f"🤖 Engine stopped ({why}). "
+                           + ("Real positions flattened."
+                              if self.cfg.close_positions_on_kill else
+                              "Positions left open with exchange-side brackets."))
 
     def _data_failure(self, message: str) -> None:
         self.data_failures += 1
         log.warning("Data failure #%d: %s", self.data_failures, message)
         if self.data_failures >= 3:
             self.journal.error("data_outage", message)
+            self.notifier.once(
+                f"outage-{self.data_failures // 10}",
+                "⚠️ Repeated market-data failures — no new entries until data "
+                "recovers. Open positions stay protected by exchange-side "
+                "brackets.")
             log.warning(
                 "Repeated data failures — no new entries until data recovers. "
                 "Open positions remain protected by exchange-side brackets."
