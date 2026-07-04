@@ -86,16 +86,17 @@ risk:
   min_quote_volume_24h: 100000000  # USDT; liquidity gate per symbol
   min_book_depth_mult: 20      # top-of-book depth >= order size x this
 
-# Shadow learning track: when the strict engine says NO_TRADE but these
-# relaxed thresholds would have fired, a VIRTUAL trade is opened and tracked
-# against real prices to its stop/target. No money is involved anywhere —
-# outcomes (in R units) only feed the research dataset, never execution.
+# Shadow learning track: a complete twin of the trading pipeline — same risk
+# checks, sizing, fees, slippage, breakeven/trailing management — running at
+# relaxed thresholds on a VIRTUAL account against real market prices. It can
+# never touch money; its trades only feed the research dataset.
 shadow:
   enabled: true
-  min_confidence: 0.35
-  min_aligned_factors: 2
-  max_age_hours: 72            # unresolved shadow trades close at market
-  state_file: shadow_state.json
+  min_confidence: 0.35         # relaxed vs the strict 0.60
+  min_aligned_factors: 2       # relaxed vs the strict 4
+  start_balance: 1000          # virtual USDT the shadow account trades
+  paper_state_file: shadow_paper_state.json
+  risk_state_file: shadow_risk_state.json
 
 execution:
   slippage_pct: 0.02           # assumed slippage per market order (sizing + backtest)

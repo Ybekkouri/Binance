@@ -73,8 +73,9 @@ class ShadowConfig:
     enabled: bool
     min_confidence: float
     min_aligned_factors: int
-    max_age_hours: float
-    state_file: str
+    start_balance: float
+    paper_state_file: str
+    risk_state_file: str
 
 
 @dataclass
@@ -192,8 +193,9 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
             enabled=bool(sh.get("enabled", False)),
             min_confidence=float(sh.get("min_confidence", 0.35)),
             min_aligned_factors=int(sh.get("min_aligned_factors", 2)),
-            max_age_hours=float(sh.get("max_age_hours", 72)),
-            state_file=sh.get("state_file", "shadow_state.json"),
+            start_balance=float(sh.get("start_balance", 1000)),
+            paper_state_file=sh.get("paper_state_file", "shadow_paper_state.json"),
+            risk_state_file=sh.get("risk_state_file", "shadow_risk_state.json"),
         ),
         slippage_pct=float(exe["slippage_pct"]),
         taker_fee_pct=float(exe["taker_fee_pct"]),

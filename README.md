@@ -30,9 +30,13 @@ bot/
   trader.py            orchestrator loop, kill switch, data-outage protection
   journal.py           JSONL audit log of every decision and order
   datastore.py         SQLite research dataset: snapshots, decisions, outcomes
-  shadow.py            virtual learning trades at relaxed thresholds (no money)
   metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
 ```
+
+The trader runs one or two **tracks** — complete, independent pipelines over
+the same market snapshots. The *real* track is the strict engine on your
+configured broker. The optional *shadow* track is the identical pipeline at
+relaxed thresholds on a virtual account (see below).
 
 ## How a trade happens (or doesn't)
 
@@ -130,17 +134,23 @@ python research.py compare --config-b config_suggested.yaml --days 60   # out-of
 ### The shadow track: trade rarely, learn constantly
 
 The strict engine trades maybe once a day — good for capital, terrible for
-sample size. The **shadow track** solves it: on every candle where the strict
-engine says NO_TRADE but the *same factor logic at relaxed thresholds*
-(confidence ≥ 0.35, 2 aligned factors) would have fired, the bot opens a
-**virtual** trade — no real money, no paper balance, nothing executed — and
-follows it against real prices with the same bracket rules (stop, partial
-TP1 + breakeven, TP2, 72h age limit). The outcome, measured in R units, lands
-in the dataset flagged `shadow`. Restart-safe via `shadow_state.json`.
+sample size. The **shadow track** solves it: a complete twin of the trading
+pipeline runs alongside the real one, on the same live market data, at
+relaxed thresholds (confidence ≥ 0.35, 2 aligned factors vs the strict
+0.60/4). *Same process, no money*: the shadow track goes through the full
+risk engine (its own daily/weekly limits and counters), full position sizing,
+simulated fills with fees and slippage on a virtual account (default 1,000
+USDT), and the full trade manager — partial TP1, breakeven move, ATR
+trailing, invalidation exits, liquidation guard — then settles its PnL and
+records everything to the dataset flagged `shadow`. Restart-safe via its own
+state files. The only thing it cannot do is touch money or influence the
+real track.
 
 So the split you'd want is built in: **limited real trades with money,
 unlimited virtual trades for data**, running simultaneously in the same
-process. Analyze them together or apart:
+process. Because the shadow account compounds its own equity, its results
+also answer a strategic question directly: *what would a relaxed version of
+this engine have earned?* Analyze the tracks together or apart:
 
 ```bash
 python research.py factors --source shadow   # learning-track only

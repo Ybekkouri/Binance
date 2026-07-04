@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS trades (
     symbol TEXT, side TEXT,
     opened_ts TEXT, closed_ts TEXT,
     pnl REAL, exit_reason TEXT,
-    shadow INTEGER DEFAULT 0   -- 1: virtual learning trade, pnl is in R units
+    shadow INTEGER DEFAULT 0   -- 1: virtual learning trade on the shadow account
 );
 CREATE INDEX IF NOT EXISTS idx_dec_symbol_ts ON decisions(symbol, ts);
 CREATE INDEX IF NOT EXISTS idx_snap_symbol_ts ON snapshots(symbol, ts);

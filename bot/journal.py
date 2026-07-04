@@ -32,12 +32,13 @@ class Journal:
     def decision(self, decision, snapshot_summary: dict) -> None:
         self.write("decision", decision=decision.to_dict(), market=snapshot_summary)
 
-    def risk_block(self, symbol: str, reasons: list) -> None:
-        self.write("risk_block", symbol=symbol, reasons=reasons)
+    def risk_block(self, symbol: str, reasons: list, track: str = "real") -> None:
+        self.write("risk_block", symbol=symbol, reasons=reasons, track=track)
 
-    def order(self, kind: str, symbol: str, request: dict, response=None) -> None:
+    def order(self, kind: str, symbol: str, request: dict, response=None,
+              track: str = "real") -> None:
         self.write("order", kind=kind, symbol=symbol, request=request,
-                   response=response)
+                   response=response, track=track)
 
     def position(self, action: str, symbol: str, **data) -> None:
         self.write("position", action=action, symbol=symbol, **data)

@@ -121,8 +121,9 @@ def cmd_factors(args) -> None:
           f"{counts['shadow_trades']} shadow) — overall win rate "
           f"{table['overall_win_rate'] * 100:.1f}%")
     if args.source == "all" and counts["shadow_trades"] and counts["real_trades"]:
-        print("note: PnL columns mix USDT (real) and R units (shadow); "
-              "win rates are unit-free and drive the suggestions.")
+        print("note: shadow PnL is USDT on the virtual shadow account, so "
+              "magnitudes differ from real trades; win rates are unit-free "
+              "and drive the suggestions.")
     print()
     header = (f"{'factor':<16}{'aligned n':>10}{'win%':>7}{'pnl':>10}"
               f"{'against n':>11}{'win%':>7}{'pnl':>10}")

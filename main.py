@@ -5,21 +5,21 @@
   python main.py --close-all         # manual override: flatten everything and exit
 
 Kill switch while running: create a file named KILL (see bot.kill_file) in
-the working directory — the bot cancels orders, optionally flattens, and stops.
+the working directory — the bot cancels orders, optionally flattens the real
+account, and stops.
 """
 
 import argparse
 import logging
 
-from bot.broker import make_broker
+from bot.broker import PaperBroker, make_broker
 from bot.config import load_config
 from bot.datastore import DataStore
 from bot.journal import Journal
 from bot.manager import TradeManager
 from bot.market_data import MarketData
 from bot.risk import RiskEngine
-from bot.shadow import ShadowBook
-from bot.trader import Trader
+from bot.trader import Track, Trader
 
 
 def main() -> None:
@@ -53,10 +53,27 @@ def main() -> None:
 
     journal = Journal(cfg.journal_file)
     datastore = DataStore(cfg.datastore_file)
+
+    # Real track: the strict engine on the configured broker.
     risk = RiskEngine(cfg)
     manager = TradeManager(cfg, broker, risk, journal, datastore=datastore)
-    shadow = ShadowBook(cfg, datastore=datastore)
-    trader = Trader(cfg, MarketData(cfg), broker, risk, manager, journal,
+    real = Track("real", cfg, broker, risk, manager, journal,
+                 datastore=datastore)
+
+    # Shadow track: the identical pipeline, relaxed thresholds, virtual money.
+    shadow = None
+    if cfg.shadow.enabled:
+        sh_broker = PaperBroker(cfg, state_file=cfg.shadow.paper_state_file,
+                                start_balance=cfg.shadow.start_balance)
+        sh_risk = RiskEngine(cfg, state_file=cfg.shadow.risk_state_file)
+        sh_manager = TradeManager(cfg, sh_broker, sh_risk, journal,
+                                  datastore=datastore, track="shadow")
+        shadow = Track("shadow", cfg, sh_broker, sh_risk, sh_manager, journal,
+                       datastore=datastore,
+                       min_confidence=cfg.shadow.min_confidence,
+                       min_aligned_factors=cfg.shadow.min_aligned_factors)
+
+    trader = Trader(cfg, MarketData(cfg), real, journal,
                     datastore=datastore, shadow=shadow)
     trader.run()
 

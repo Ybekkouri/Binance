@@ -174,22 +174,25 @@ class PaperBroker:
 
     START_BALANCE = 1000.0
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, state_file: str = None, start_balance: float = None):
         self.cfg = cfg
+        self.state_file = state_file or cfg.paper_state_file
+        self.start_balance = start_balance or self.START_BALANCE
         self.state = self._load()
-        log.info("PaperBroker: balance %.2f USDT (simulated).", self.state["balance"])
+        log.info("PaperBroker[%s]: balance %.2f USDT (simulated).",
+                 self.state_file, self.state["balance"])
 
     def _load(self) -> dict:
-        if os.path.isfile(self.cfg.paper_state_file):
+        if os.path.isfile(self.state_file):
             try:
-                with open(self.cfg.paper_state_file) as f:
+                with open(self.state_file) as f:
                     return json.load(f)
             except json.JSONDecodeError:
                 pass
-        return {"balance": self.START_BALANCE, "positions": {}, "closed": []}
+        return {"balance": self.start_balance, "positions": {}, "closed": []}
 
     def _save(self) -> None:
-        with open(self.cfg.paper_state_file, "w") as f:
+        with open(self.state_file, "w") as f:
             json.dump(self.state, f, indent=1)
 
     def setup_symbol(self, symbol: str) -> None:

@@ -45,22 +45,23 @@ class RiskState:
 
 
 class RiskEngine:
-    def __init__(self, cfg):
+    def __init__(self, cfg, state_file: str = None):
         self.cfg = cfg
+        self.state_file = state_file or cfg.state_file
         self.state = self._load()
 
     # ---------- persistence ----------
     def _load(self) -> RiskState:
-        if os.path.isfile(self.cfg.state_file):
+        if os.path.isfile(self.state_file):
             try:
-                with open(self.cfg.state_file) as f:
+                with open(self.state_file) as f:
                     return RiskState(**json.load(f))
             except (json.JSONDecodeError, TypeError):
                 pass
         return RiskState()
 
     def save(self) -> None:
-        with open(self.cfg.state_file, "w") as f:
+        with open(self.state_file, "w") as f:
             json.dump(asdict(self.state), f, indent=1)
 
     # ---------- day / week rolling ----------

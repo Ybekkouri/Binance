@@ -26,12 +26,15 @@ LIQ_ATR_BUFFER = 3.0  # flatten if liquidation is within this many ATRs
 
 
 class TradeManager:
-    def __init__(self, cfg, broker, risk, journal, datastore=None):
+    def __init__(self, cfg, broker, risk, journal, datastore=None,
+                 track: str = "real"):
         self.cfg = cfg
         self.broker = broker
         self.risk = risk
         self.journal = journal
         self.datastore = datastore
+        self.track = track
+        self.is_shadow = track != "real"
 
     def on_entry(self, decision, amount: float, equity: float,
                  decision_id=None) -> None:
@@ -49,7 +52,7 @@ class TradeManager:
             "decision_id": decision_id,
         }
         self.risk.record_open(decision.symbol, info, equity)
-        self.journal.position("opened", decision.symbol, **info)
+        self.journal.position("opened", decision.symbol, track=self.track, **info)
 
     def manage(self, snap, opposing_decision=None) -> None:
         """Run one management pass for a symbol with an open position."""
@@ -142,6 +145,7 @@ class TradeManager:
         self.risk.record_close(symbol, pnl, equity)
         self.journal.position(
             "closed", symbol, pnl=pnl, equity=equity, exit_reason=reason,
+            track=self.track,
             daily_pnl=self.risk.state.daily_pnl,
             consecutive_losses=self.risk.state.consecutive_losses,
         )
@@ -150,7 +154,8 @@ class TradeManager:
                 info["opened_ms"] / 1000, tz=timezone.utc).isoformat()
             self.datastore.record_trade(
                 symbol, info["side"], opened_ts, pnl, reason,
-                decision_id=info.get("decision_id"),
+                decision_id=info.get("decision_id"), shadow=self.is_shadow,
             )
-        log.info("%s closed (%s): %+.2f USDT | today %+.2f | equity %.2f",
-                 symbol, reason, pnl, self.risk.state.daily_pnl, equity)
+        log.info("[%s] %s closed (%s): %+.2f USDT | today %+.2f | equity %.2f",
+                 self.track, symbol, reason, pnl,
+                 self.risk.state.daily_pnl, equity)
