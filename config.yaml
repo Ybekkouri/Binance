@@ -86,6 +86,17 @@ risk:
   min_quote_volume_24h: 100000000  # USDT; liquidity gate per symbol
   min_book_depth_mult: 20      # top-of-book depth >= order size x this
 
+# Shadow learning track: when the strict engine says NO_TRADE but these
+# relaxed thresholds would have fired, a VIRTUAL trade is opened and tracked
+# against real prices to its stop/target. No money is involved anywhere —
+# outcomes (in R units) only feed the research dataset, never execution.
+shadow:
+  enabled: true
+  min_confidence: 0.35
+  min_aligned_factors: 2
+  max_age_hours: 72            # unresolved shadow trades close at market
+  state_file: shadow_state.json
+
 execution:
   slippage_pct: 0.02           # assumed slippage per market order (sizing + backtest)
   taker_fee_pct: 0.05          # Binance USDS-M taker fee

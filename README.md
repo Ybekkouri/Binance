@@ -30,6 +30,7 @@ bot/
   trader.py            orchestrator loop, kill switch, data-outage protection
   journal.py           JSONL audit log of every decision and order
   datastore.py         SQLite research dataset: snapshots, decisions, outcomes
+  shadow.py            virtual learning trades at relaxed thresholds (no money)
   metrics.py           win rate, profit factor, Sharpe, Sortino, expectancy...
 ```
 
@@ -125,6 +126,29 @@ python research.py factors                   # which factors actually predict wi
 python research.py factors --write config_suggested.yaml   # bounded weight candidate
 python research.py compare --config-b config_suggested.yaml --days 60   # out-of-sample referee
 ```
+
+### The shadow track: trade rarely, learn constantly
+
+The strict engine trades maybe once a day — good for capital, terrible for
+sample size. The **shadow track** solves it: on every candle where the strict
+engine says NO_TRADE but the *same factor logic at relaxed thresholds*
+(confidence ≥ 0.35, 2 aligned factors) would have fired, the bot opens a
+**virtual** trade — no real money, no paper balance, nothing executed — and
+follows it against real prices with the same bracket rules (stop, partial
+TP1 + breakeven, TP2, 72h age limit). The outcome, measured in R units, lands
+in the dataset flagged `shadow`. Restart-safe via `shadow_state.json`.
+
+So the split you'd want is built in: **limited real trades with money,
+unlimited virtual trades for data**, running simultaneously in the same
+process. Analyze them together or apart:
+
+```bash
+python research.py factors --source shadow   # learning-track only
+python research.py factors --source real     # money trades only
+python research.py factors                   # both (win rates are unit-free)
+```
+
+Shadow data never influences execution — it only informs the research loop.
 
 The learning discipline, in order: **collect → measure → suggest → validate
 out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),

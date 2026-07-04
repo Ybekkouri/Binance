@@ -18,6 +18,7 @@ from bot.journal import Journal
 from bot.manager import TradeManager
 from bot.market_data import MarketData
 from bot.risk import RiskEngine
+from bot.shadow import ShadowBook
 from bot.trader import Trader
 
 
@@ -54,8 +55,9 @@ def main() -> None:
     datastore = DataStore(cfg.datastore_file)
     risk = RiskEngine(cfg)
     manager = TradeManager(cfg, broker, risk, journal, datastore=datastore)
+    shadow = ShadowBook(cfg, datastore=datastore)
     trader = Trader(cfg, MarketData(cfg), broker, risk, manager, journal,
-                    datastore=datastore)
+                    datastore=datastore, shadow=shadow)
     trader.run()
 
 

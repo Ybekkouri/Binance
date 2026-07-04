@@ -45,13 +45,13 @@ WEIGHT_CAP = 3.0
 
 
 # ------------------------------------------------------------ factors
-def factor_table(store: DataStore) -> dict:
-    """Per-factor performance over executed, closed trades.
+def factor_table(store: DataStore, source: str = "all") -> dict:
+    """Per-factor performance over closed trades (real, shadow, or all).
 
     'aligned' = the factor voted in the trade's direction; 'against' = it
     voted the other way but was overruled by the confluence.
     """
-    trades = store.executed_trades_with_votes()
+    trades = store.executed_trades_with_votes(source)
     stats: dict = {}
     overall_wins = sum(1 for t in trades if t["pnl"] > 0)
     for t in trades:
@@ -108,14 +108,22 @@ def suggest_weights(table: dict, current_weights: dict,
 def cmd_factors(args) -> None:
     cfg = load_config(args.config, require_keys=False)
     store = DataStore(cfg.datastore_file)
-    table = factor_table(store)
+    table = factor_table(store, args.source)
     if table["n_trades"] == 0:
-        print("No executed trades in the dataset yet. Run the bot (paper mode "
-              "counts) or the collector, and come back when trades exist.")
+        print("No closed trades in the dataset yet for source "
+              f"'{args.source}'. Run the bot (paper mode counts — and the "
+              "shadow track fills the dataset fastest), then come back.")
         return
 
-    print(f"Executed trades analyzed: {table['n_trades']} "
-          f"(overall win rate {table['overall_win_rate'] * 100:.1f}%)\n")
+    counts = store.counts()
+    print(f"Trades analyzed: {table['n_trades']} (source={args.source}; "
+          f"dataset has {counts['real_trades']} real, "
+          f"{counts['shadow_trades']} shadow) — overall win rate "
+          f"{table['overall_win_rate'] * 100:.1f}%")
+    if args.source == "all" and counts["shadow_trades"] and counts["real_trades"]:
+        print("note: PnL columns mix USDT (real) and R units (shadow); "
+              "win rates are unit-free and drive the suggestions.")
+    print()
     header = (f"{'factor':<16}{'aligned n':>10}{'win%':>7}{'pnl':>10}"
               f"{'against n':>11}{'win%':>7}{'pnl':>10}")
     print(header)
@@ -218,6 +226,8 @@ def main() -> None:
 
     p = sub.add_parser("factors", help="factor performance & weight suggestions")
     p.add_argument("--min-trades", type=int, default=MIN_SAMPLE_DEFAULT)
+    p.add_argument("--source", choices=["all", "real", "shadow"], default="all",
+                   help="which trades to learn from (default: all)")
     p.add_argument("--write", default=None,
                    help="write candidate config to this path")
 

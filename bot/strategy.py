@@ -155,8 +155,14 @@ def hard_gates(snap: MarketSnapshot, direction: str, cfg) -> list[str]:
     return vetoes
 
 
-def decide(snap: MarketSnapshot, cfg) -> TradeDecision:
+def decide(snap: MarketSnapshot, cfg, min_confidence: float = None,
+           min_aligned_factors: int = None) -> TradeDecision:
+    """Evaluate one symbol. Threshold overrides let the shadow-learning track
+    run the IDENTICAL factor logic at relaxed thresholds."""
     st = cfg.strategy
+    min_conf = st.min_confidence if min_confidence is None else min_confidence
+    min_align = (st.min_aligned_factors if min_aligned_factors is None
+                 else min_aligned_factors)
     df = snap.candles
     min_bars = max(st.ema_slow, st.swing_lookback, st.breakout_lookback,
                    st.volume_ma, st.atr_period) + 2
@@ -173,16 +179,16 @@ def decide(snap: MarketSnapshot, cfg) -> TradeDecision:
     aligned = [v for v in votes if v.vote != 0 and v.weight > 0
                and (v.vote > 0) == (direction == LONG)]
 
-    if direction == NO_TRADE or confidence < st.min_confidence:
+    if direction == NO_TRADE or confidence < min_conf:
         return _no_trade(
             snap.symbol,
-            [f"confidence {confidence:.2f} below minimum {st.min_confidence:.2f}"],
+            [f"confidence {confidence:.2f} below minimum {min_conf:.2f}"],
             votes, condition, confidence,
         )
-    if len(aligned) < st.min_aligned_factors:
+    if len(aligned) < min_align:
         return _no_trade(
             snap.symbol,
-            [f"only {len(aligned)} factors aligned; need {st.min_aligned_factors}"],
+            [f"only {len(aligned)} factors aligned; need {min_align}"],
             votes, condition, confidence,
         )
 

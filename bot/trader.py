@@ -32,7 +32,7 @@ def _tf_seconds(timeframe: str) -> int:
 
 class Trader:
     def __init__(self, cfg, market, broker, risk, manager, journal,
-                 datastore=None):
+                 datastore=None, shadow=None):
         self.cfg = cfg
         self.market = market
         self.broker = broker
@@ -40,6 +40,7 @@ class Trader:
         self.manager = manager
         self.journal = journal
         self.datastore = datastore
+        self.shadow = shadow
         self.last_eval_candle: dict = {}    # symbol -> evaluated candle ts
         self.data_failures = 0
 
@@ -87,6 +88,8 @@ class Trader:
         snap = self.market.snapshot(symbol, btc_trend)
         if hasattr(self.broker, "mark"):            # paper: trigger simulated fills
             self.broker.mark(symbol, snap.last_price)
+        if self.shadow is not None:                 # learning track fills/expiries
+            self.shadow.update(symbol, snap.last_price)
 
         if snap.age_seconds() > self.cfg.max_stale_data_seconds:
             self.journal.error("data", f"stale snapshot for {symbol}")
@@ -110,13 +113,35 @@ class Trader:
         # Journal + dataset: every decision, including NO_TRADE.
         self.journal.decision(decision, snap.summary())
         decision_id = None
+        snapshot_id = None
         if self.datastore is not None:
             snapshot_id = self.datastore.record_snapshot(snap)
             decision_id = self.datastore.record_decision(decision, snapshot_id)
         if decision.direction == NO_TRADE:
+            self._consider_shadow(snap, snapshot_id)
             return
 
         self._try_enter(decision, snap, decision_id)
+
+    def _consider_shadow(self, snap, snapshot_id) -> None:
+        """Strict engine passed — would relaxed thresholds have traded?
+        If so, open a virtual trade for the learning dataset."""
+        if self.shadow is None or not self.cfg.shadow.enabled:
+            return
+        if snap.symbol in self.shadow.book:
+            return
+        relaxed = strategy.decide(
+            snap, self.cfg,
+            min_confidence=self.cfg.shadow.min_confidence,
+            min_aligned_factors=self.cfg.shadow.min_aligned_factors,
+        )
+        if relaxed.direction == NO_TRADE:
+            return
+        shadow_decision_id = None
+        if self.datastore is not None and snapshot_id is not None:
+            shadow_decision_id = self.datastore.record_decision(
+                relaxed, snapshot_id, shadow=True)
+        self.shadow.consider(relaxed, decision_id=shadow_decision_id)
 
     def _try_enter(self, decision, snap, decision_id=None) -> None:
         symbol = decision.symbol

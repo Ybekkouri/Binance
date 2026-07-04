@@ -69,6 +69,15 @@ class RiskConfig:
 
 
 @dataclass
+class ShadowConfig:
+    enabled: bool
+    min_confidence: float
+    min_aligned_factors: int
+    max_age_hours: float
+    state_file: str
+
+
+@dataclass
 class Config:
     mode: str
     api_key: str
@@ -83,6 +92,7 @@ class Config:
     strategy: StrategyConfig = field(default=None)
     exits: ExitConfig = field(default=None)
     risk: RiskConfig = field(default=None)
+    shadow: ShadowConfig = field(default=None)
     # execution assumptions
     slippage_pct: float = 0.02
     taker_fee_pct: float = 0.05
@@ -119,6 +129,7 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
         raw["trading"], raw["strategy"], raw["exits"], raw["risk"],
         raw["execution"], raw["bot"],
     )
+    sh = raw.get("shadow", {})
     cfg = Config(
         mode=mode,
         api_key=api_key,
@@ -176,6 +187,13 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
             max_spread_pct=float(rk["max_spread_pct"]),
             min_quote_volume_24h=float(rk["min_quote_volume_24h"]),
             min_book_depth_mult=float(rk["min_book_depth_mult"]),
+        ),
+        shadow=ShadowConfig(
+            enabled=bool(sh.get("enabled", False)),
+            min_confidence=float(sh.get("min_confidence", 0.35)),
+            min_aligned_factors=int(sh.get("min_aligned_factors", 2)),
+            max_age_hours=float(sh.get("max_age_hours", 72)),
+            state_file=sh.get("state_file", "shadow_state.json"),
         ),
         slippage_pct=float(exe["slippage_pct"]),
         taker_fee_pct=float(exe["taker_fee_pct"]),

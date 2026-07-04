@@ -1,6 +1,7 @@
 .env
 bot_state.json
 paper_state.json
+shadow_state.json
 journal.jsonl
 market_data.db
 config_suggested.yaml
