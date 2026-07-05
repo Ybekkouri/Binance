@@ -35,7 +35,7 @@ class Track:
 
     def __init__(self, name, cfg, broker, risk, manager, journal,
                  datastore=None, min_confidence=None, min_aligned_factors=None,
-                 notifier=None):
+                 notifier=None, events=None):
         self.name = name
         self.is_shadow = name != "real"
         self.cfg = cfg
@@ -47,6 +47,7 @@ class Track:
         self.min_confidence = min_confidence
         self.min_aligned_factors = min_aligned_factors
         self.notifier = notifier
+        self.events = events
         self.last_eval_candle: dict = {}
 
     def process(self, snap, snapshot_id=None) -> None:
@@ -117,6 +118,8 @@ class Track:
 
         fails = self.risk.account_checks(equity, positions, notional, symbol)
         fails += self.risk.market_checks(snap, amount)
+        if self.events is not None:
+            fails += self.events.check(snap)
         # Exchange minimum order value: the TP1 partial is the smallest order
         # in the bracket, so IT must clear the minimum, not just the entry.
         min_notional = getattr(self.broker, "min_notional", lambda s: 0.0)(symbol)

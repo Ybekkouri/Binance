@@ -102,6 +102,19 @@ execution:
   slippage_pct: 0.02           # assumed slippage per market order (sizing + backtest)
   taker_fee_pct: 0.05          # Binance USDS-M taker fee
 
+# Event guard: the bot's ears on the world. Sudden world events show up as
+# violent candles before any news feed can report them — the shock detector
+# stands aside when one prints. For events known in advance (Fed decisions,
+# CPI releases), add blackout windows and no new trades open inside them.
+events:
+  shock_atr_mult: 3.0          # candle range >= 3x ATR = something happened
+  shock_cooldown_minutes: 60   # stand aside this long after a shock
+  blackouts: []
+  # example:
+  # blackouts:
+  #   - {start: "2026-07-29T17:30:00Z", end: "2026-07-29T19:30:00Z", label: "FOMC"}
+  #   - {start: "2026-08-12T12:00:00Z", end: "2026-08-12T13:30:00Z", label: "US CPI"}
+
 # Telegram: the bot messages your phone (startup, trades, daily halts,
 # outages, shutdown) and obeys /status /kill /help from the configured chat.
 # Secrets go in .env: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.

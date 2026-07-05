@@ -16,6 +16,7 @@ import os
 from bot.broker import PaperBroker, make_broker
 from bot.config import load_config
 from bot.datastore import DataStore
+from bot.events import EventGuard
 from bot.journal import Journal
 from bot.manager import TradeManager
 from bot.market_data import MarketData
@@ -59,13 +60,14 @@ def main() -> None:
     journal = Journal(cfg.journal_file)
     datastore = DataStore(cfg.datastore_file)
     notifier = make_notifier(cfg)
+    events = EventGuard(cfg, notifier=notifier)   # shared: market-level guard
 
     # Real track: the strict engine on the configured broker.
     risk = RiskEngine(cfg)
     manager = TradeManager(cfg, broker, risk, journal, datastore=datastore,
                            notifier=notifier)
     real = Track("real", cfg, broker, risk, manager, journal,
-                 datastore=datastore, notifier=notifier)
+                 datastore=datastore, notifier=notifier, events=events)
 
     # Shadow track: the identical pipeline, relaxed thresholds, virtual money.
     shadow = None
@@ -80,7 +82,7 @@ def main() -> None:
                        datastore=datastore,
                        min_confidence=cfg.shadow.min_confidence,
                        min_aligned_factors=cfg.shadow.min_aligned_factors,
-                       notifier=notifier)
+                       notifier=notifier, events=events)
 
     trader = Trader(cfg, MarketData(cfg), real, journal,
                     datastore=datastore, shadow=shadow, notifier=notifier)

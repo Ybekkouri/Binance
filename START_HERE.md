@@ -33,6 +33,13 @@ It also keeps a second, virtual trader running alongside (the "shadow
 track") that trades pretend money on real prices to gather learning data
 faster, and it writes every decision to a database you can analyze later.
 
+It has ears on the world, too — the smart way: big events (crashes, hacks,
+surprise announcements) hit prices within seconds, faster than any news
+site. When the bot sees a violently abnormal candle it stands aside for an
+hour and messages you. And for events you know are coming (US Fed decisions,
+inflation reports), you can list "blackout windows" in the settings during
+which it simply won't open trades.
+
 ## The safety ladder — where you are at each phase
 
 | Phase | Money at risk | What it proves |

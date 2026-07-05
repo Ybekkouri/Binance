@@ -69,6 +69,13 @@ class RiskConfig:
 
 
 @dataclass
+class EventsConfig:
+    shock_atr_mult: float
+    shock_cooldown_minutes: int
+    blackouts: list
+
+
+@dataclass
 class ShadowConfig:
     enabled: bool
     min_confidence: float
@@ -94,6 +101,7 @@ class Config:
     exits: ExitConfig = field(default=None)
     risk: RiskConfig = field(default=None)
     shadow: ShadowConfig = field(default=None)
+    events: EventsConfig = field(default=None)
     # execution assumptions
     slippage_pct: float = 0.02
     taker_fee_pct: float = 0.05
@@ -137,6 +145,7 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
     )
     sh = raw.get("shadow", {})
     tg = raw.get("telegram", {})
+    ev = raw.get("events", {})
     cfg = Config(
         mode=mode,
         api_key=api_key,
@@ -194,6 +203,11 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
             max_spread_pct=float(rk["max_spread_pct"]),
             min_quote_volume_24h=float(rk["min_quote_volume_24h"]),
             min_book_depth_mult=float(rk["min_book_depth_mult"]),
+        ),
+        events=EventsConfig(
+            shock_atr_mult=float(ev.get("shock_atr_mult", 3.0)),
+            shock_cooldown_minutes=int(ev.get("shock_cooldown_minutes", 60)),
+            blackouts=list(ev.get("blackouts") or []),
         ),
         shadow=ShadowConfig(
             enabled=bool(sh.get("enabled", False)),

@@ -73,6 +73,15 @@ All limits are **ratios of equity**, so they scale with the account.
 No martingale, no averaging down, no revenge trading — the engine refuses
 duplicate positions and cools off after consecutive losses.
 
+**Event awareness** (`bot/events.py`): world events reach prices faster than
+any news feed reaches a bot, so the guard listens to the market's own
+seismograph — a candle whose range exceeds 3× ATR marks a shock, blocking
+new entries for a cooldown (with a Telegram alert) while existing positions
+stay protected by their exchange-side brackets. For events known in advance
+(Fed decisions, CPI prints), add blackout windows to `config.yaml` and no
+trades open inside them. Deliberately not a headline-sentiment trader:
+standing aside during chaos is the edge that survives fake news.
+
 ## Setup
 
 ```bash
