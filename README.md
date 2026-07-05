@@ -1,5 +1,10 @@
 # Binance Futures Trading Engine
 
+> **Not a developer? Start with [START_HERE.md](START_HERE.md)** — a
+> complete plain-language guide from zero to a running bot, phase by phase,
+> with every command ready to copy-paste. The rest of this README is the
+> technical reference.
+
 A risk-first trading engine for Binance USDⓈ-M perpetual futures. Its primary
 goal is **capital preservation**: it trades only when multiple independent
 factors align and every risk control is satisfied. The default action is
