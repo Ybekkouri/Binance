@@ -128,20 +128,33 @@ def main() -> None:
         if cfg.mode != "testnet" or broker is None:
             warn("--order skipped: only allowed in testnet mode with working keys")
         else:
+            symbol = cfg.symbols[0]
+            last = float(market.client.fetch_ticker(symbol)["last"])
             try:
-                symbol = cfg.symbols[0]
-                price = broker.price_to_precision(
-                    symbol, float(market.client.fetch_ticker(symbol)["last"]) * 0.5)
+                price = broker.price_to_precision(symbol, last * 0.5)
                 amount = broker.amount_to_precision(
                     symbol, max(120.0 / price, 0.001))
                 order = broker.client.create_order(
                     symbol, "limit", "buy", amount, price)
                 broker.client.cancel_order(order["id"], symbol)
-                ok("order round-trip works — placed and cancelled a far-away "
-                   "test limit order on the testnet")
+                ok("regular order round-trip works (limit placed + cancelled)")
             except Exception as e:                           # noqa: BLE001
                 bad(f"test order failed: {e}",
                     "check futures permission and testnet balance")
+            # Conditional (trigger) orders are the path real stop-loss /
+            # take-profit brackets use — test it explicitly.
+            try:
+                trigger = broker.price_to_precision(symbol, last * 0.3)
+                sl = broker.client.create_order(
+                    symbol, "market", "sell", None, None,
+                    {"stopLossPrice": trigger, "closePosition": True})
+                broker.client.cancel_order(sl["id"], symbol, {"trigger": True})
+                ok("conditional order round-trip works (bracket-style stop "
+                   "placed + cancelled)")
+            except Exception as e:                           # noqa: BLE001
+                bad(f"conditional (stop/TP) test order failed: {e}",
+                    "this is the exact mechanism real brackets use — do NOT "
+                    "go live until this passes on the testnet")
 
     # 7 ---- telegram
     if not cfg.telegram_enabled:

@@ -54,25 +54,34 @@ class Track:
         if hasattr(self.broker, "mark"):        # paper fills trigger on price
             self.broker.mark(symbol, snap.last_price)
 
-        decision = strategy.decide(
-            snap, self.cfg,
-            min_confidence=self.min_confidence,
-            min_aligned_factors=self.min_aligned_factors,
-        )
+        # One positions fetch per tick, shared with management and entry.
+        positions = self.broker.open_positions()
+        position = next((p for p in positions if p["symbol"] == symbol), None)
+        has_position = position is not None or symbol in self.risk.state.managed
 
-        has_position = any(
-            p["symbol"] == symbol for p in self.broker.open_positions()
-        ) or symbol in self.risk.state.managed
         if has_position:
-            self.manager.manage(snap, opposing_decision=decision)
+            # decide() is needed here for invalidation (opposing signal).
+            decision = strategy.decide(
+                snap, self.cfg,
+                min_confidence=self.min_confidence,
+                min_aligned_factors=self.min_aligned_factors,
+            )
+            self.manager.manage(snap, opposing_decision=decision,
+                                position=position)
             return
 
-        # Signals come from closed candles: evaluate/record each candle once.
+        # Signals come from closed candles: evaluate/record each candle once
+        # (checked BEFORE decide, so intra-candle ticks skip the indicator work).
         candle_ts = str(snap.candles.index[-1]) if len(snap.candles) else ""
         if self.last_eval_candle.get(symbol) == candle_ts:
             return
         self.last_eval_candle[symbol] = candle_ts
 
+        decision = strategy.decide(
+            snap, self.cfg,
+            min_confidence=self.min_confidence,
+            min_aligned_factors=self.min_aligned_factors,
+        )
         decision_id = None
         if not self.is_shadow:
             # The real track journals everything, including NO_TRADE.
@@ -87,12 +96,14 @@ class Track:
                 decision, snapshot_id, shadow=True)
 
         if decision.direction != NO_TRADE:
-            self._try_enter(decision, snap, decision_id)
+            self._try_enter(decision, snap, decision_id, positions)
 
-    def _try_enter(self, decision, snap, decision_id=None) -> None:
+    def _try_enter(self, decision, snap, decision_id=None,
+                   positions=None) -> None:
         symbol = decision.symbol
         equity = self.broker.equity_usdt()
-        positions = self.broker.open_positions()
+        if positions is None:
+            positions = self.broker.open_positions()
 
         amount = self.risk.position_size(
             equity, decision.entry_price, decision.stop_loss, positions
@@ -106,8 +117,6 @@ class Track:
 
         fails = self.risk.account_checks(equity, positions, notional, symbol)
         fails += self.risk.market_checks(snap, amount)
-        if decision.leverage > self.cfg.risk.max_leverage:
-            fails.append("leverage above maximum")
         margin_needed = notional / max(self.cfg.leverage, 1)
         if margin_needed > equity * 0.95:
             fails.append("insufficient margin for position")
@@ -144,7 +153,8 @@ class Track:
             if self.datastore is not None and decision_id is not None:
                 self.datastore.mark_executed(decision_id)
             self.manager.on_entry(decision, amount, equity,
-                                  decision_id=decision_id)
+                                  decision_id=decision_id,
+                                  sl_order_id=response.get("sl_order_id"))
             if self.notifier is not None and (
                     not self.is_shadow or self.cfg.telegram_notify_shadow):
                 tag = "" if not self.is_shadow else " [shadow]"
@@ -157,6 +167,9 @@ class Track:
                     f"confidence {decision.confidence:.2f}, RR {decision.risk_reward:.1f}")
         except (ccxt.BaseError, RuntimeError) as e:
             self.journal.error("execution", f"[{self.name}] {symbol}: {e}")
+            # allow a retry on the next tick of the same candle — the signal
+            # is still valid and the failure may have been transient
+            self.last_eval_candle.pop(symbol, None)
             if not self.is_shadow:
                 raise           # real-track errors bubble up to the loop
             log.exception("[shadow] entry failed on %s", symbol)
@@ -223,6 +236,10 @@ class Trader:
             except ccxt.BaseError:
                 log.exception("Exchange error on %s", symbol)
                 self.journal.error("tick", f"exchange error on {symbol}")
+            except Exception:   # noqa: BLE001 — one bad symbol must never
+                # kill the loop: open positions elsewhere still need managing
+                log.exception("Unexpected error on %s", symbol)
+                self.journal.error("tick", f"unexpected error on {symbol}")
 
     def _process_symbol(self, symbol: str, btc_trend: int) -> None:
         snap = self.market.snapshot(symbol, btc_trend)
@@ -244,7 +261,12 @@ class Trader:
 
     # ------------------------------------------------------------ telegram
     def _handle_commands(self) -> None:
-        for cmd in self.notifier.poll_commands():
+        commands = self.notifier.poll_commands()
+        if commands and hasattr(self.notifier, "ack"):
+            # confirm the advanced offset server-side immediately, otherwise
+            # a /kill followed by shutdown would replay on every restart
+            self.notifier.ack()
+        for cmd in commands:
             log.info("Telegram command: %s", cmd)
             self.journal.write("telegram_command", command=cmd)
             if cmd == "/kill":
@@ -289,12 +311,16 @@ class Trader:
         self.journal.write("shutdown", reason=why,
                            close_positions=self.cfg.close_positions_on_kill)
         try:
-            for symbol in self.cfg.symbols:
-                self.real.broker.cancel_all(symbol)
             if self.cfg.close_positions_on_kill:
+                # flattening cancels all orders too
                 self.real.broker.close_all()
                 log.warning("All real positions flattened. "
                             "(Shadow positions are virtual and persist.)")
+            else:
+                # positions stay open — their exchange-side brackets MUST
+                # stay too, so cancel nothing
+                log.warning("Positions left open, exchange-side brackets "
+                            "left in place.")
         except ccxt.BaseError:
             log.exception("Error during emergency shutdown — check the exchange!")
             self.notifier.send("⚠️ Error during emergency shutdown — CHECK "
@@ -311,11 +337,14 @@ class Trader:
         log.warning("Data failure #%d: %s", self.data_failures, message)
         if self.data_failures >= 3:
             self.journal.error("data_outage", message)
-            self.notifier.once(
-                f"outage-{self.data_failures // 10}",
-                "⚠️ Repeated market-data failures — no new entries until data "
-                "recovers. Open positions stay protected by exchange-side "
-                "brackets.")
+            # alert at most once per hour so repeat outages still notify
+            now = time.time()
+            if now - getattr(self, "_last_outage_alert", 0) > 3600:
+                self._last_outage_alert = now
+                self.notifier.send(
+                    "⚠️ Repeated market-data failures — no new entries until "
+                    "data recovers. Open positions stay protected by "
+                    "exchange-side brackets.")
             log.warning(
                 "Repeated data failures — no new entries until data recovers. "
                 "Open positions remain protected by exchange-side brackets."

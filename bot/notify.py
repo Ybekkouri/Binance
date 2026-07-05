@@ -23,7 +23,7 @@ import requests
 log = logging.getLogger("bot.notify")
 
 API = "https://api.telegram.org/bot{token}/{method}"
-TIMEOUT = 10
+TIMEOUT = 5  # short: a slow Telegram must not stall the trading loop
 
 
 class Telegram:
@@ -82,6 +82,18 @@ class Telegram:
             if text.startswith("/"):
                 commands.append(text.split("@")[0].lower())
         return commands
+
+    def ack(self) -> None:
+        """Confirm the current offset server-side so processed commands are
+        never replayed after a restart (critical for /kill: without this,
+        Telegram redelivers it on the next startup and the bot re-kills)."""
+        if not self.enabled:
+            return
+        try:
+            self._api("getUpdates", {"offset": self.offset, "timeout": 0,
+                                     "limit": 1})
+        except Exception as e:      # noqa: BLE001
+            log.warning("Telegram ack failed: %s", e)
 
 
 class NullNotifier:

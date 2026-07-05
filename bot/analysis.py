@@ -272,8 +272,9 @@ def factors_detailed(trades: list) -> str:
                 s["g_n"] += 1
                 s["g_w"] += win
 
-    lines = [f"Factor performance vs baseline win rate "
-             f"{base_wins/base_n*100:.0f}% ('*' = significant at 95%):",
+    lines = [f"Factor performance (overall win rate "
+             f"{base_wins/base_n*100:.0f}%; '*' = aligned vs rest significant "
+             "at 95%):",
              f"{'factor':<16}{'aligned n':>10}{'win%':>7}{'95% CI':>15}"
              f"{'z':>7}{'  against n':>12}{'win%':>7}"]
     lines.append("-" * len(lines[1]))
@@ -281,7 +282,11 @@ def factors_detailed(trades: list) -> str:
         if s["a_n"]:
             wr = s["a_w"] / s["a_n"]
             lo, hi = wilson_interval(s["a_w"], s["a_n"])
-            z = two_prop_z(s["a_w"], s["a_n"], base_wins, base_n)
+            # compare against the DISJOINT complement (all trades where the
+            # factor was not aligned) — testing a subset against a baseline
+            # that contains it biases z toward zero and hides real edges
+            comp_w, comp_n = base_wins - s["a_w"], base_n - s["a_n"]
+            z = two_prop_z(s["a_w"], s["a_n"], comp_w, comp_n)
             star = "*" if abs(z) >= Z95 else " "
             ci = f"[{lo*100:.0f}-{hi*100:.0f}%]"
         else:

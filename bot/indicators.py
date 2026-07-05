@@ -16,7 +16,11 @@ def rsi(series: pd.Series, period: int) -> pd.Series:
     gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
     rs = gain / loss.replace(0, pd.NA)
-    return (100 - 100 / (1 + rs)).fillna(100.0)
+    out = 100 - 100 / (1 + rs)
+    # zero average loss is only "RSI 100" when there were actual gains;
+    # a dead-flat series (gain == loss == 0) is neutral, not overbought
+    out[(loss == 0) & (gain > 0)] = 100.0
+    return out.fillna(50.0)
 
 
 def atr(df: pd.DataFrame, period: int) -> pd.Series:

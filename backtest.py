@@ -17,7 +17,6 @@ No API keys needed — public market data only.
 
 import argparse
 import logging
-from datetime import datetime
 
 import ccxt
 import pandas as pd
@@ -45,7 +44,9 @@ def fetch_history(client, symbol: str, timeframe: str, days: int) -> pd.DataFram
             break
         rows.extend(batch)
         since = batch[-1][0] + tf_ms
-    return _to_df(rows)
+    df = _to_df(rows)
+    # drop the still-forming candle — the live engine never sees it either
+    return df.iloc[:-1] if len(df) > 1 else df
 
 
 def fetch_funding(client, symbol: str, days: int) -> pd.Series:
@@ -111,19 +112,29 @@ class SimRisk:
 
     def on_close(self, pnl: float):
         self.daily_pnl += pnl
-        self.consecutive_losses = 0 if pnl > 0 else self.consecutive_losses + 1
+        # mirror RiskEngine: fee-noise breakeven exits are not "losses"
+        noise = self.equity_day_start * 0.0005
+        if pnl > 0:
+            self.consecutive_losses = 0
+        elif pnl < -noise:
+            self.consecutive_losses += 1
 
 
 # ------------------------------------------------------------ engine
 def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
                  btc_trend_lookup, funding: pd.Series, start_equity: float):
     st, exi = cfg.strategy, cfg.exits
+    if len(df) < 2 or len(trend_df) < 2:
+        return pd.DataFrame(), pd.Series(dtype=float)
     fee_pct = cfg.taker_fee_pct / 100
     slip_pct = cfg.slippage_pct / 100
     base_delta = df.index[1] - df.index[0]
     trend_delta = trend_df.index[1] - trend_df.index[0]
     trend_close_times = trend_df.index + trend_delta
     atr_full = atr_series(df, st.atr_period)
+    # funding aligned to bars once, instead of Series.asof per bar
+    funding_at_bar = (funding.reindex(df.index, method="ffill")
+                      if len(funding) else pd.Series(index=df.index, dtype=float))
     bar_hours = base_delta.total_seconds() / 3600
     # 24h rolling quote volume, approximated from base candles
     bars_per_day = max(1, int(24 / bar_hours))
@@ -152,7 +163,7 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
             p = position
             sign = 1 if p["side"] == "long" else -1
             notional = p["contracts"] * float(bar["close"])
-            fr = float(funding.asof(ts)) if len(funding) else 0.0
+            fr = float(funding_at_bar.iloc[i]) if len(funding) else 0.0
             if fr == fr:  # not NaN
                 cost = sign * fr * notional * bar_hours / 8
                 p["funding"] += cost
@@ -193,7 +204,6 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
                 close = float(bar["close"])
                 r_gain = sign * (close - p["entry"]) / p["risk_dist"]
                 if not p["breakeven_done"] and r_gain >= exi.breakeven_at_r:
-                    p["stop"] = p["entry"] if sign > 0 else p["entry"]
                     p["stop"] = p["entry"]
                     p["breakeven_done"] = True
                 if r_gain >= exi.tp1_r:
@@ -214,7 +224,9 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
             trend_candles=trend_df.iloc[max(0, n_trend - 200):n_trend],
             last_price=float(bar["close"]),
             quote_volume_24h=float(quote_vol.iloc[i]) if quote_vol.iloc[i] == quote_vol.iloc[i] else 0.0,
-            funding_rate=float(funding.asof(ts)) if len(funding) and funding.asof(ts) == funding.asof(ts) else None,
+            funding_rate=(float(funding_at_bar.iloc[i])
+                          if funding_at_bar.iloc[i] == funding_at_bar.iloc[i]
+                          else None),
             oi_change_pct=None,
             book=None,
             btc_trend=btc_trend_lookup(ts),

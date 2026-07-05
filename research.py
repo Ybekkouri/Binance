@@ -39,9 +39,9 @@ separates learning from curve-fitting.
 """
 
 import argparse
-import copy
 import json
 import logging
+import math
 import time
 
 import yaml
@@ -98,7 +98,7 @@ def suggest_weights(table: dict, current_weights: dict,
     over the overall win rate, capped at +/-25%, only with enough sample."""
     suggestions = dict(current_weights)
     notes = []
-    base = table["overall_win_rate"]
+    total_wins = table["overall_win_rate"] * table["n_trades"]
     for name, s in table["factors"].items():
         if name not in current_weights:
             continue
@@ -106,13 +106,18 @@ def suggest_weights(table: dict, current_weights: dict,
             notes.append(f"{name}: only {s['aligned_n']} aligned trades "
                          f"(need {min_trades}) — keeping weight")
             continue
-        edge = s["aligned_wins"] / s["aligned_n"] - base
+        # edge vs the DISJOINT complement (trades where the factor was not
+        # aligned) — a baseline containing the subset understates real edges
+        comp_n = table["n_trades"] - s["aligned_n"]
+        comp_rate = ((total_wins - s["aligned_wins"]) / comp_n
+                     if comp_n else table["overall_win_rate"])
+        edge = s["aligned_wins"] / s["aligned_n"] - comp_rate
         shift = max(-MAX_WEIGHT_SHIFT, min(MAX_WEIGHT_SHIFT, edge))
         new = round(min(WEIGHT_CAP, max(0.0, current_weights[name] * (1 + shift))), 2)
         if new != current_weights[name]:
             notes.append(f"{name}: aligned win rate "
                          f"{s['aligned_wins'] / s['aligned_n'] * 100:.0f}% vs "
-                         f"{base * 100:.0f}% overall -> weight "
+                         f"{comp_rate * 100:.0f}% when not aligned -> weight "
                          f"{current_weights[name]} -> {new}")
             suggestions[name] = new
     return suggestions, notes
@@ -190,7 +195,13 @@ def cmd_compare(args) -> None:
         print("\n=== VERDICT (B minus A) ===")
         for key in ("total_pnl", "profit_factor", "sharpe", "sortino",
                     "max_drawdown_pct", "win_rate_pct"):
-            print(f"{key:<18}{b[key] - a[key]:+.2f}")
+            va, vb = a[key], b[key]
+            if not (math.isfinite(va) and math.isfinite(vb)):
+                # e.g. profit factor is inf when a run had zero losers
+                print(f"{key:<18}n/a (A={va:.2f}, B={vb:.2f} — "
+                      "too few trades for a meaningful ratio)")
+                continue
+            print(f"{key:<18}{vb - va:+.2f}")
         print("\nPromote B only if it wins on profit factor and drawdown, "
               "not just total PnL — and re-check on a second period.")
 

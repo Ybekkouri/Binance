@@ -38,7 +38,7 @@ class TradeManager:
         self.notifier = notifier
 
     def on_entry(self, decision, amount: float, equity: float,
-                 decision_id=None) -> None:
+                 decision_id=None, sl_order_id=None) -> None:
         info = {
             "side": "long" if decision.direction == LONG else "short",
             "entry": decision.entry_price,
@@ -51,25 +51,40 @@ class TradeManager:
             "breakeven_done": False,
             "opened_ms": int(time.time() * 1000),
             "decision_id": decision_id,
+            "sl_order_id": sl_order_id,
+            "settle_attempts": 0,
         }
         self.risk.record_open(decision.symbol, info, equity)
         self.journal.position("opened", decision.symbol, track=self.track, **info)
 
-    def manage(self, snap, opposing_decision=None) -> None:
-        """Run one management pass for a symbol with an open position."""
+    def manage(self, snap, opposing_decision=None, position="fetch") -> None:
+        """Run one management pass for a symbol with an open position.
+        The caller may pass the already-fetched position dict (or None if
+        flat) to avoid a redundant API call."""
         symbol = snap.symbol
         info = self.risk.state.managed.get(symbol)
-        position = next(
-            (p for p in self.broker.open_positions() if p["symbol"] == symbol), None
-        )
+        if position == "fetch":
+            position = next(
+                (p for p in self.broker.open_positions()
+                 if p["symbol"] == symbol), None
+            )
 
         if position is None:
             if info is not None:
                 self._settle(symbol, info, reason=self._exit_reason(symbol))
             return
         if info is None:
-            # Position exists that we have no record of (e.g. manual trade).
+            # Position exists that we have no record of (manual trade, or a
+            # crash between entry and record). We won't touch it, but the
+            # operator must know it has no bot-side management.
             log.warning("Unmanaged position on %s — leaving it alone.", symbol)
+            if self.notifier is not None:
+                self.notifier.once(
+                    f"unmanaged-{symbol}",
+                    f"⚠️ Unmanaged {position['side']} position detected on "
+                    f"{symbol} ({position['contracts']} contracts). The bot "
+                    "will NOT manage it — verify its stop-loss on Binance, "
+                    "or close it manually.")
             return
 
         price = snap.last_price
@@ -119,11 +134,15 @@ class TradeManager:
                     (max(new_stop, trail) if side == "long" else min(new_stop, trail))
 
         if new_stop is not None and not math.isclose(new_stop, info["stop"]):
-            self.broker.replace_stop(symbol, side, new_stop)
+            new_id = self.broker.replace_stop(
+                symbol, side, new_stop,
+                old_order_id=info.get("sl_order_id"),
+                old_stop=info["stop"])
             self.journal.position("stop_moved", symbol,
                                   old_stop=info["stop"], new_stop=new_stop,
                                   r_gain=round(r_gain, 2))
             info["stop"] = new_stop
+            info["sl_order_id"] = new_id
             self.risk.save()
 
     def _exit_reason(self, symbol: str) -> str:
@@ -134,13 +153,27 @@ class TradeManager:
         return "bracket"
 
     def _settle(self, symbol: str, info: dict, reason: str = "bracket") -> None:
-        """Position is gone: cancel leftovers, book the PnL, update counters."""
+        """Position is gone: cancel leftovers, book the PnL, update counters.
+
+        A failed PnL fetch is retried on later ticks rather than silently
+        booked as zero — booking 0 would blind the daily loss limit."""
         self.broker.cancel_all(symbol)
         try:
             pnl = self.broker.realized_pnl_since(symbol, info["opened_ms"])
         except Exception:
-            log.exception("Could not fetch realized PnL for %s; recording 0.", symbol)
-            self.journal.error("settle", f"pnl fetch failed for {symbol}")
+            info["settle_attempts"] = info.get("settle_attempts", 0) + 1
+            if info["settle_attempts"] < 5:
+                log.warning("PnL fetch failed for %s (attempt %d) — will retry.",
+                            symbol, info["settle_attempts"])
+                self.risk.save()
+                return
+            log.exception("PnL fetch failed 5x for %s; recording 0.", symbol)
+            self.journal.error("settle", f"pnl fetch failed 5x for {symbol}")
+            if self.notifier is not None:
+                self.notifier.send(
+                    f"⚠️ Could not fetch realized PnL for {symbol} after 5 "
+                    "attempts — recorded as 0. Daily loss tracking may be "
+                    "off; check the account manually.")
             pnl = 0.0
         equity = self.broker.equity_usdt()
         self.risk.record_close(symbol, pnl, equity)

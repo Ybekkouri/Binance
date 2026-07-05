@@ -68,7 +68,8 @@ def format_report(m: dict, daily_pnl: pd.Series = None) -> str:
         f"Total PnL:         {m['total_pnl']:+.2f} USDT ({m['return_pct']:+.2f}%)",
         f"Fees paid:         {m['total_fees']:.2f} USDT",
         f"Funding paid:      {m['total_funding']:+.2f} USDT",
-        f"Max drawdown:      {m['max_drawdown_pct']:.2f}%",
+        f"Max drawdown:      {m['max_drawdown_pct']:.2f}% "
+        "(measured at trade closes; intra-trade dips run deeper)",
         f"Sharpe ratio:      {m['sharpe']:.2f}",
         f"Sortino ratio:     {m['sortino']:.2f}",
         f"Final equity:      {m['final_equity']:.2f} USDT",

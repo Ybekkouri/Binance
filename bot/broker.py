@@ -81,59 +81,103 @@ class LiveBroker:
         return float(self.client.price_to_precision(symbol, price))
 
     # ---- orders ----
+    # Conditional orders (stop-loss / take-profit) on Binance USDS-M route
+    # through separate "algo" endpoints in ccxt. Two consequences shape this
+    # code: order types must be expressed via the unified stopLossPrice /
+    # takeProfitPrice params (a raw params["type"] is consumed as the MARKET
+    # type and silently dropped, turning take-profits into instant-trigger
+    # stops), and fetching/cancelling them requires params={"trigger": True}
+    # (plain calls only see regular orders).
+
     def enter(self, symbol: str, side: str, amount: float, stop: float,
               tp1: float, tp1_amount: float, tp2: float) -> dict:
-        """Market entry + close-position stop + partial TP1 + close-position TP2."""
+        """Market entry + close-position stop + partial TP1 + close-position TP2.
+
+        Returns {"id": entry order id, "sl_order_id": stop order id}.
+        """
         order_side = "buy" if side == "long" else "sell"
         close_side = "sell" if side == "long" else "buy"
-        entry = self.client.create_order(symbol, "market", order_side, amount)
         try:
-            self.client.create_order(
+            entry = self.client.create_order(symbol, "market", order_side, amount)
+        except ccxt.BaseError:
+            # A client-side timeout can leave a filled order behind: flatten
+            # defensively so no naked position survives an entry error.
+            log.exception("Entry order failed on %s — defensive flatten.", symbol)
+            try:
+                self.close_position(symbol)
+            except ccxt.BaseError:
+                log.exception("Defensive flatten also failed — CHECK EXCHANGE.")
+            raise
+        try:
+            sl = self.client.create_order(
                 symbol, "market", close_side, None, None,
-                {"stopPrice": self.price_to_precision(symbol, stop),
-                 "type": "STOP_MARKET", "closePosition": True},
+                {"stopLossPrice": self.price_to_precision(symbol, stop),
+                 "closePosition": True},
             )
             if tp1_amount > 0:
                 self.client.create_order(
                     symbol, "market", close_side, tp1_amount, None,
-                    {"stopPrice": self.price_to_precision(symbol, tp1),
-                     "type": "TAKE_PROFIT_MARKET", "reduceOnly": True},
+                    {"takeProfitPrice": self.price_to_precision(symbol, tp1),
+                     "reduceOnly": True},
                 )
             self.client.create_order(
                 symbol, "market", close_side, None, None,
-                {"stopPrice": self.price_to_precision(symbol, tp2),
-                 "type": "TAKE_PROFIT_MARKET", "closePosition": True},
+                {"takeProfitPrice": self.price_to_precision(symbol, tp2),
+                 "closePosition": True},
             )
         except ccxt.BaseError:
             log.exception("Bracket placement failed for %s — flattening.", symbol)
             self.close_position(symbol)
             raise
-        return entry
+        return {"id": entry.get("id"), "sl_order_id": sl.get("id")}
 
-    def replace_stop(self, symbol: str, side: str, new_stop: float) -> None:
+    def replace_stop(self, symbol: str, side: str, new_stop: float,
+                     old_order_id: str = None, old_stop: float = None) -> str:
         """Cancel the existing stop and place a new close-position stop.
-        New stop goes in first only when it wouldn't instantly conflict; we
-        cancel-then-place and re-flatten on failure to stay protected."""
+        Identifies the old stop by order id, falling back to matching its
+        trigger price among open trigger orders. Returns the new order id;
+        flattens on failure so the position is never left unprotected."""
         close_side = "sell" if side == "long" else "buy"
-        for o in self.client.fetch_open_orders(symbol):
-            if o.get("type", "").upper().startswith("STOP"):
-                self.client.cancel_order(o["id"], symbol)
+        cancelled = False
+        if old_order_id:
+            try:
+                self.client.cancel_order(old_order_id, symbol,
+                                         {"trigger": True})
+                cancelled = True
+            except ccxt.BaseError as e:
+                log.warning("cancel stop %s by id failed (%s); falling back "
+                            "to trigger-price match", old_order_id, e)
+        if not cancelled and old_stop:
+            try:
+                for o in self.client.fetch_open_orders(symbol,
+                                                       params={"trigger": True}):
+                    trig = float(o.get("triggerPrice") or
+                                 o.get("stopPrice") or 0)
+                    if trig and abs(trig - old_stop) / old_stop < 0.002:
+                        self.client.cancel_order(o["id"], symbol,
+                                                 {"trigger": True})
+            except ccxt.BaseError:
+                log.exception("trigger-order scan failed on %s", symbol)
         try:
-            self.client.create_order(
+            new = self.client.create_order(
                 symbol, "market", close_side, None, None,
-                {"stopPrice": self.price_to_precision(symbol, new_stop),
-                 "type": "STOP_MARKET", "closePosition": True},
+                {"stopLossPrice": self.price_to_precision(symbol, new_stop),
+                 "closePosition": True},
             )
+            return new.get("id")
         except ccxt.BaseError:
             log.exception("Failed to replace stop on %s — closing position.", symbol)
             self.close_position(symbol)
             raise
 
     def cancel_all(self, symbol: str) -> None:
-        try:
-            self.client.cancel_all_orders(symbol)
-        except ccxt.BaseError:
-            log.exception("cancel_all_orders(%s) failed", symbol)
+        """Cancel BOTH regular and conditional (trigger) orders."""
+        for params in ({}, {"trigger": True}):
+            try:
+                self.client.cancel_all_orders(symbol, params=params)
+            except ccxt.BaseError as e:
+                # "no orders to cancel" style errors are fine
+                log.debug("cancel_all_orders(%s, %s): %s", symbol, params, e)
 
     def close_position(self, symbol: str) -> None:
         for p in self.open_positions():
@@ -149,18 +193,27 @@ class LiveBroker:
     def close_all(self) -> None:
         for p in self.open_positions():
             self.close_position(p["symbol"])
+        for symbol in self.cfg.symbols:
+            self.cancel_all(symbol)
 
     def realized_pnl_since(self, symbol: str, since_ms: int) -> float:
-        """Realized PnL + commissions + funding for a symbol since a time."""
+        """Realized PnL + commissions + funding for a symbol since a time.
+        Paginates the income history: the endpoint returns at most 1000 rows
+        per call across ALL symbols, and funding rows accumulate fast."""
+        market_id = self.client.market_id(symbol)
         total = 0.0
         for income_type in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
-            entries = self.client.fetch_ledger(
-                since=since_ms, params={"incomeType": income_type}
-            )
-            for e in entries:
-                info = e.get("info", {})
-                if info.get("symbol") == self.client.market_id(symbol):
-                    total += float(e["amount"])
+            since = since_ms
+            for _ in range(10):  # hard cap: 10k rows per income type
+                entries = self.client.fetch_ledger(
+                    since=since, limit=1000, params={"incomeType": income_type}
+                )
+                for e in entries:
+                    if e.get("info", {}).get("symbol") == market_id:
+                        total += float(e["amount"])
+                if len(entries) < 1000:
+                    break
+                since = int(entries[-1]["timestamp"]) + 1
         return total
 
 
@@ -192,8 +245,11 @@ class PaperBroker:
         return {"balance": self.start_balance, "positions": {}, "closed": []}
 
     def _save(self) -> None:
-        with open(self.state_file, "w") as f:
+        # atomic write: a crash mid-write must never truncate the state file
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(self.state, f, indent=1)
+        os.replace(tmp, self.state_file)
 
     def setup_symbol(self, symbol: str) -> None:
         pass
@@ -255,19 +311,27 @@ class PaperBroker:
         }
         self._save()
         log.info("[paper] entry %s %s %.6f @ %.2f (fee %.4f)", side, symbol, amount, fill, fee)
-        return {"id": f"paper-{symbol}-{int(time.time())}", "price": fill}
+        return {"id": f"paper-{symbol}-{int(time.time())}", "price": fill,
+                "sl_order_id": None}
 
-    def replace_stop(self, symbol: str, side: str, new_stop: float) -> None:
+    def replace_stop(self, symbol: str, side: str, new_stop: float,
+                     old_order_id: str = None, old_stop: float = None):
         pos = self.state["positions"].get(symbol)
         if pos:
             pos["stop"] = new_stop
             self._save()
+        return None
 
     def cancel_all(self, symbol: str) -> None:
         pass
 
     def mark(self, symbol: str, price: float) -> None:
-        """Update the mark price and trigger any SL/TP fills."""
+        """Update the mark price and trigger any SL/TP fills.
+
+        Realism rules: a stop that has been gapped through fills at the
+        (worse) current price, not the trigger; take-profits fill at their
+        trigger (never credited gap upside); after a TP1 partial the
+        remaining brackets are re-checked in the same tick."""
         self.state.setdefault("marks", {})[symbol] = price
         pos = self.state["positions"].get(symbol)
         if pos is None:
@@ -279,16 +343,28 @@ class PaperBroker:
         def crossed(level: float, above: bool) -> bool:
             return price >= level if above else price <= level
 
-        # Stop-loss (checked first: conservative)
-        if crossed(pos["stop"], above=pos["side"] == "short"):
-            self._close_amount(symbol, pos["contracts"], pos["stop"], "stop_loss")
-        elif not pos["tp1_filled"] and crossed(pos["tp1"], above=pos["side"] == "long"):
-            self._close_amount(symbol, pos["tp1_amount"], pos["tp1"], "take_profit_1")
+        for _ in range(2):   # a TP1 fill may be followed by TP2/stop same tick
             pos = self.state["positions"].get(symbol)
-            if pos:
-                pos["tp1_filled"] = True
-        elif crossed(pos["tp2"], above=pos["side"] == "long"):
-            self._close_amount(symbol, pos["contracts"], pos["tp2"], "take_profit_2")
+            if pos is None:
+                break
+            if crossed(pos["stop"], above=pos["side"] == "short"):
+                # gap-through fills at the worse of trigger vs market
+                fill = (min(pos["stop"], price) if sign > 0
+                        else max(pos["stop"], price))
+                self._close_amount(symbol, pos["contracts"], fill, "stop_loss")
+                break
+            if not pos["tp1_filled"] and crossed(pos["tp1"],
+                                                 above=pos["side"] == "long"):
+                self._close_amount(symbol, pos["tp1_amount"], pos["tp1"],
+                                   "take_profit_1")
+                pos = self.state["positions"].get(symbol)
+                if pos:
+                    pos["tp1_filled"] = True
+                continue
+            if crossed(pos["tp2"], above=pos["side"] == "long"):
+                self._close_amount(symbol, pos["contracts"], pos["tp2"],
+                                   "take_profit_2")
+            break
         self._save()
 
     def _close_amount(self, symbol: str, amount: float, price: float, reason: str) -> None:
@@ -310,6 +386,8 @@ class PaperBroker:
                 "closed_ms": int(time.time() * 1000),
                 "opened_ms": pos["opened_ms"],
             })
+            # bound the history so the per-tick state rewrite stays small
+            self.state["closed"] = self.state["closed"][-500:]
             del self.state["positions"][symbol]
 
     def close_position(self, symbol: str) -> None:

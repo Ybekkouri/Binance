@@ -61,8 +61,11 @@ class RiskEngine:
         return RiskState()
 
     def save(self) -> None:
-        with open(self.state_file, "w") as f:
+        # atomic write: a crash mid-write must never truncate risk state
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(asdict(self.state), f, indent=1)
+        os.replace(tmp, self.state_file)
 
     # ---------- day / week rolling ----------
     def roll(self, equity: float) -> None:
@@ -84,9 +87,18 @@ class RiskEngine:
         self.save()
 
     def record_close(self, symbol: str, pnl: float, equity: float) -> None:
-        self.roll(equity)
+        # If this close triggers a day/week roll (overnight position closing
+        # after midnight), seed the fresh day's base with PRE-close equity so
+        # the loss isn't measured against an already-shrunken base.
+        self.roll(equity - pnl)
         self.state.daily_pnl += pnl
-        self.state.consecutive_losses = 0 if pnl > 0 else self.state.consecutive_losses + 1
+        # Loss streaks count real losses, not fee noise: a breakeven exit a
+        # few cents negative must not trigger the consecutive-loss cooldown.
+        noise = self.state.equity_day_start * 0.0005  # 0.05% of equity
+        if pnl > 0:
+            self.state.consecutive_losses = 0
+        elif pnl < -noise:
+            self.state.consecutive_losses += 1
         self.state.managed.pop(symbol, None)
         self.save()
 

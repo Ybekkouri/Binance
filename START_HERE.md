@@ -75,8 +75,8 @@ laptop) and open the bot's settings file:
 cd /opt/binance-bot && nano config.yaml
 ```
 
-**2.** On the second-to-top line, change `mode: testnet` to `mode: paper`.
-Save and exit: press `Ctrl+O`, `Enter`, then `Ctrl+X`.
+**2.** Near the top, find the line `mode: testnet` and change it to
+`mode: paper`. Save and exit: press `Ctrl+O`, `Enter`, then `Ctrl+X`.
 
 **3.** Add your Telegram codes:
 

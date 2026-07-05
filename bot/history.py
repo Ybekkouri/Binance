@@ -63,7 +63,9 @@ def fetch_daily_history(conn, symbol: str, source: str = "spot",
     last = conn.execute(
         "SELECT MAX(ts) FROM candles_daily WHERE symbol=? AND source=?",
         (symbol, source)).fetchone()[0]
-    since = (last + DAY_MS) if last else 1483228800000   # 2017-01-01
+    # resume FROM the last cached candle (not after it): the previous run may
+    # have cached it while still forming, and INSERT OR REPLACE heals it here
+    since = last if last else 1483228800000   # 2017-01-01
     fetched = 0
     while True:
         batch = client.fetch_ohlcv(symbol, "1d", since=since, limit=1000)
@@ -174,14 +176,13 @@ def yearly(df: pd.DataFrame) -> str:
 
 
 def classify_days(df: pd.DataFrame) -> pd.Series:
-    """Daily regime labels using the engine's logic transplanted to 1d."""
-    ema20 = df["close"].ewm(span=20, adjust=False).mean()
-    ema50 = df["close"].ewm(span=50, adjust=False).mean()
-    prev_close = df["close"].shift(1)
-    tr = pd.concat([df["high"] - df["low"],
-                    (df["high"] - prev_close).abs(),
-                    (df["low"] - prev_close).abs()], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    """Daily regime labels using the engine's own indicator functions
+    (bot/indicators.py), so history stats measure the same regime definition
+    the live engine trades on."""
+    from . import indicators as ta
+    ema20 = ta.ema(df["close"], 20)
+    ema50 = ta.ema(df["close"], 50)
+    atr = ta.atr(df, 14)
     atr_pct = atr / df["close"] * 100
     sep = (ema20 - ema50) / atr.replace(0, pd.NA)
 
@@ -235,7 +236,10 @@ def seasonality(df: pd.DataFrame) -> str:
         g = r[r.index.month == m]
         if len(g) < 20:
             continue
-        z = two_prop_z((g > 0).sum(), len(g), base_up, len(r))
+        up = (g > 0).sum()
+        # compare against the disjoint rest-of-year, not a baseline
+        # containing this month (overlap biases z toward zero)
+        z = two_prop_z(up, len(g), base_up - up, len(r) - len(g))
         star = " *" if abs(z) >= Z95 else ""
         lines.append(f"  {months[m-1]}: avg {g.mean()*100:+.3f}%/day, "
                      f"{(g>0).mean()*100:.0f}% up days (n={len(g)}){star}")
@@ -245,7 +249,8 @@ def seasonality(df: pd.DataFrame) -> str:
         g = r[r.index.dayofweek == d]
         if len(g) < 20:
             continue
-        z = two_prop_z((g > 0).sum(), len(g), base_up, len(r))
+        up = (g > 0).sum()
+        z = two_prop_z(up, len(g), base_up - up, len(r) - len(g))
         star = " *" if abs(z) >= Z95 else ""
         lines.append(f"  {days[d]}: avg {g.mean()*100:+.3f}%/day, "
                      f"{(g>0).mean()*100:.0f}% up days (n={len(g)}){star}")

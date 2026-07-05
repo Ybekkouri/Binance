@@ -67,19 +67,37 @@ def _to_df(raw: list) -> pd.DataFrame:
     return df.set_index("timestamp").astype(float)
 
 
+SLOW_TTL = 300  # seconds; funding/OI/positioning move on 1h periods anyway
+
+
 class MarketData:
     def __init__(self, cfg):
         self.cfg = cfg
         self.client = ccxt.binanceusdm({"enableRateLimit": True})
         self.client.load_markets()
+        self._cache: dict = {}
+
+    def _cached(self, key, fetch):
+        """TTL cache for slow-moving fields — cuts per-tick request count
+        (and Binance rate-limit weight) roughly in half."""
+        now = time.time()
+        hit = self._cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+        value = fetch()
+        self._cache[key] = (now + SLOW_TTL, value)
+        return value
 
     def candles(self, symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame:
         raw = self.client.fetch_ohlcv(symbol, timeframe, limit=limit)
         return _to_df(raw).iloc[:-1]  # drop the still-forming candle
 
-    def book_summary(self, symbol: str, levels: int) -> BookSummary:
+    def book_summary(self, symbol: str, levels: int) -> Optional[BookSummary]:
         book = self.client.fetch_order_book(symbol, limit=max(levels, 5))
         bids, asks = book["bids"][:levels], book["asks"][:levels]
+        if not bids or not asks:
+            log.warning("empty order book side for %s", symbol)
+            return None
         bid, ask = bids[0][0], asks[0][0]
         bid_depth = sum(v for _, v in bids)
         ask_depth = sum(v for _, v in asks)
@@ -144,6 +162,9 @@ class MarketData:
 
     def btc_trend(self) -> int:
         """Higher-timeframe BTC direction used as the market filter."""
+        return self._cached(("btc_trend",), self._btc_trend_fresh)
+
+    def _btc_trend_fresh(self) -> int:
         from . import indicators
         df = self.candles("BTC/USDT", self.cfg.trend_timeframe, limit=200)
         fast = indicators.ema(df["close"], self.cfg.strategy.trend_ema_fast)
@@ -156,17 +177,26 @@ class MarketData:
 
     def snapshot(self, symbol: str, btc_trend: int) -> MarketSnapshot:
         st = self.cfg.strategy
+        started = time.time()   # staleness measured from fetch START
         ticker = self.client.fetch_ticker(symbol)
-        return MarketSnapshot(
+        snap = MarketSnapshot(
             symbol=symbol,
             candles=self.candles(symbol, self.cfg.timeframe, limit=300),
-            trend_candles=self.candles(symbol, self.cfg.trend_timeframe, limit=200),
+            trend_candles=self._cached(
+                ("trend", symbol),
+                lambda: self.candles(symbol, self.cfg.trend_timeframe, limit=200)),
             last_price=float(ticker["last"]),
             quote_volume_24h=float(ticker.get("quoteVolume") or 0),
-            funding_rate=self.funding_rate(symbol),
-            oi_change_pct=self.oi_change_pct(symbol),
+            funding_rate=self._cached(
+                ("funding", symbol), lambda: self.funding_rate(symbol)),
+            oi_change_pct=self._cached(
+                ("oi", symbol), lambda: self.oi_change_pct(symbol)),
             book=self.book_summary(symbol, st.book_depth_levels),
             btc_trend=btc_trend,
-            long_short_ratio=self.long_short_ratio(symbol),
-            taker_buy_sell_ratio=self.taker_buy_sell_ratio(symbol),
+            long_short_ratio=self._cached(
+                ("lsr", symbol), lambda: self.long_short_ratio(symbol)),
+            taker_buy_sell_ratio=self._cached(
+                ("taker", symbol), lambda: self.taker_buy_sell_ratio(symbol)),
         )
+        snap.taken_at = started
+        return snap

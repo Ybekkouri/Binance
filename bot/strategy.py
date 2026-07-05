@@ -1,6 +1,6 @@
 """Strategy engine: multi-factor confluence with NO_TRADE as the default.
 
-Twelve independent factors each cast a weighted vote (+1 bullish, -1 bearish,
+Eleven independent factors each cast a weighted vote (+1 bullish, -1 bearish,
 0 neutral). A trade is proposed only when:
 
   1. no hard gate vetoes (volatility band, BTC filter, funding extremes),
@@ -15,7 +15,6 @@ Anything else returns a NO_TRADE decision with the reasons recorded, so every
 import math
 from datetime import datetime, timezone
 
-import pandas as pd
 
 from . import indicators as ta
 from .decision import LONG, SHORT, NO_TRADE, FactorVote, TradeDecision, blended_rr
@@ -106,14 +105,22 @@ def collect_votes(snap: MarketSnapshot, cfg) -> list[FactorVote]:
             1 if fr < -st.max_funding_against / 2 else 0
         add("funding", f_vote, f"funding={fr:+.5f}")
 
-    # 10. Open interest confirming the price move
+    # 10. Open interest confirming the price move. snap.oi_change_pct is
+    # measured over ~12 hours, so the price direction must use the same
+    # window (in execution-timeframe bars), not a fixed bar count.
     if snap.oi_change_pct is None:
         add("open_interest", 0, "open interest unavailable")
     else:
-        price_dir = 1 if close > float(df["close"].iloc[-12]) else -1
+        if len(df.index) >= 2:
+            bar_secs = (df.index[1] - df.index[0]).total_seconds()
+        else:
+            bar_secs = 900
+        lookback = min(len(df) - 1, max(1, int(12 * 3600 / bar_secs)))
+        price_dir = 1 if close > float(df["close"].iloc[-lookback - 1]) else -1
         oi_vote = price_dir if snap.oi_change_pct > 1.0 else 0
         add("open_interest", oi_vote,
-            f"OI change {snap.oi_change_pct:+.1f}% with price {'up' if price_dir > 0 else 'down'}")
+            f"OI change {snap.oi_change_pct:+.1f}% with 12h price "
+            f"{'up' if price_dir > 0 else 'down'}")
 
     # 11. Order book imbalance
     if snap.book is None:
@@ -234,7 +241,7 @@ def decide(snap: MarketSnapshot, cfg, min_confidence: float = None,
               ["no factor currently against the trade"],
         invalidation=(
             f"close beyond {stop:.2f} (stop) or opposing signal with "
-            f"confidence >= {st.min_confidence:.2f}"
+            f"confidence >= {min_conf:.2f}"
         ),
         votes=votes,
     )

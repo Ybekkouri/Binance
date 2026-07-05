@@ -13,7 +13,9 @@ trade. You can check status or emergency-stop it from anywhere by texting it.
 
 Any provider works. Two easy options:
 
-- **Hetzner** (hetzner.com/cloud) — CX11/CPX11 plan, ~€4/month. Recommended.
+- **Hetzner** (hetzner.com/cloud) — the smallest shared plan on offer
+  (names change over time; anything with 1–2 vCPU is plenty), ~€4–5/month.
+  Recommended.
 - **DigitalOcean** (digitalocean.com) — Basic Droplet, $6/month.
 
 When creating the server, choose:

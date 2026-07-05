@@ -34,6 +34,7 @@ bot/
   manager.py           breakeven, ATR trailing, invalidation & liquidation guard
   trader.py            orchestrator loop, kill switch, data-outage protection
   journal.py           JSONL audit log of every decision and order
+  notify.py            Telegram alerts + /status /kill /help remote commands
   datastore.py         SQLite research dataset: snapshots, decisions, outcomes
   analysis.py          the complete statistical analysis over the dataset
   history.py           deep multi-year history: phases, regimes, drawdowns

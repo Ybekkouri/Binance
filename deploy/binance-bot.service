@@ -15,7 +15,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/binance-bot
 ExecStart=/usr/bin/python3 /opt/binance-bot/main.py
-Restart=always
+# on-failure (NOT always): the kill switch and /kill exit cleanly and must
+# STAY stopped until an explicit `systemctl start`; crashes exit non-zero
+# and still restart automatically.
+Restart=on-failure
 RestartSec=15
 # main.py asks for typed confirmation in live mode; a service has no
 # keyboard, so live mode under systemd requires this env override only
