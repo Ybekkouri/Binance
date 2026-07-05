@@ -12,7 +12,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# notify + WatchdogSec: the bot heartbeats every cycle; if the process HANGS
+# (not just crashes) for 5 minutes, systemd kills and restarts it.
+Type=notify
+WatchdogSec=300
+NotifyAccess=all
 WorkingDirectory=/opt/binance-bot
 ExecStart=/usr/bin/python3 /opt/binance-bot/main.py
 # on-failure (NOT always): the kill switch and /kill exit cleanly and must

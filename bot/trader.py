@@ -26,6 +26,27 @@ import ccxt
 from . import strategy
 from .decision import LONG, NO_TRADE
 
+
+def sd_notify(message: str) -> None:
+    """Ping systemd (READY=1 / WATCHDOG=1). No-op outside systemd.
+
+    With Type=notify + WatchdogSec in the unit, a HUNG process (not just a
+    crashed one) gets killed and restarted automatically."""
+    sock_path = os.environ.get("NOTIFY_SOCKET")
+    if not sock_path:
+        return
+    import socket
+    if sock_path.startswith("@"):
+        sock_path = "\0" + sock_path[1:]
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            s.sendto(message.encode(), sock_path)
+        finally:
+            s.close()
+    except OSError as e:
+        log.debug("sd_notify failed: %s", e)
+
 log = logging.getLogger("bot.trader")
 
 
@@ -222,6 +243,7 @@ class Trader:
             f"-{self.cfg.risk.daily_max_loss_pct}%/+"
             f"{self.cfg.risk.daily_profit_target_pct}%\n"
             f"Commands: /status /kill /help")
+        sd_notify("READY=1")
         try:
             while True:
                 if self._kill_requested():
@@ -233,6 +255,8 @@ class Trader:
             self._shutdown("keyboard interrupt")
 
     def tick(self) -> None:
+        sd_notify("WATCHDOG=1")   # heartbeat: a hung loop gets restarted
+        self._maybe_daily_summary()
         self._handle_commands()
         try:
             btc_trend = self.market.btc_trend()
@@ -273,6 +297,30 @@ class Trader:
             self.shadow.process(snap, snapshot_id)
 
     # ------------------------------------------------------------ telegram
+    def _maybe_daily_summary(self) -> None:
+        """First tick of a new UTC day: message yesterday's results for both
+        tracks, read from risk state BEFORE the day-roll wipes the counters."""
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_summary_date", None) is None:
+            self._summary_date = today          # first tick after start: skip
+            return
+        if self._summary_date == today:
+            return
+        self._summary_date = today
+        lines = [f"🌅 Daily report — {self.cfg.mode}"]
+        for track in filter(None, [self.real, self.shadow]):
+            st = track.risk.state
+            if st.date == today:                # already rolled; nothing held
+                continue
+            lines.append(
+                f"[{track.name}] {st.date}: {st.daily_pnl:+.2f} USDT over "
+                f"{st.trades_today} trade(s)"
+                + (f", {st.consecutive_losses} loss streak"
+                   if st.consecutive_losses else ""))
+        if len(lines) > 1:
+            self.notifier.send("\n".join(lines))
+
     def _handle_commands(self) -> None:
         commands = self.notifier.poll_commands()
         if commands and hasattr(self.notifier, "ack"):
