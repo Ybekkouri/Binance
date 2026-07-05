@@ -93,7 +93,28 @@ The default `config.yaml` runs in **testnet** mode (fake money) — the right
 place to start. To run with no Binance account at all, edit `config.yaml`
 and set `mode: paper`.
 
-## Step 6 — Test run (~2 min)
+## Step 6 — Verify every connection (~2 min)
+
+The bot ships with a checker that tests each link in the chain — config,
+API keys, market data, account access, trading permission, Telegram — and
+tells you exactly what to fix if something is wrong:
+
+```bash
+cd /opt/binance-bot && python3 check.py
+```
+
+You want to see `ALL CHECKS PASSED` (it also sends a test message to your
+phone). On the testnet you can additionally prove order placement works
+end-to-end — it places a far-away limit order and immediately cancels it:
+
+```bash
+python3 check.py --order
+```
+
+If anything shows ❌, read its `FIX:` line, fix it, and run the checker
+again. Do not start the bot until everything passes.
+
+## Step 7 — Test run (~2 min)
 
 ```bash
 cd /opt/binance-bot && python3 main.py
@@ -103,7 +124,7 @@ Within a few seconds your phone should buzz: *"🤖 Engine started..."*.
 Send it `/status` and it answers. When you're satisfied, stop it with
 `Ctrl+C` (your phone gets a shutdown message too).
 
-## Step 7 — Make it permanent (~3 min)
+## Step 8 — Make it permanent (~3 min)
 
 This makes the bot start automatically at boot and restart itself if it
 ever crashes:

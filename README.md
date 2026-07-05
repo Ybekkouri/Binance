@@ -74,6 +74,12 @@ pip install -r requirements.txt
 cp .env.example .env    # only needed for testnet/live modes
 ```
 
+**Verify every connection before starting**: `python3 check.py` tests
+config, API keys, market data, account access, trading permission, and
+Telegram, with a plain-language fix for anything broken. On the testnet,
+`python3 check.py --order` additionally proves order placement end-to-end
+(places and immediately cancels a far-away limit order).
+
 **Running it 24/7 with your phone as the dashboard:** the bot needs a
 machine that's always on — a $4–6/month cloud server is the right tool, and
 [docs/VPS_SETUP.md](docs/VPS_SETUP.md) walks a complete beginner from
