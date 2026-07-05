@@ -117,6 +117,16 @@ class Track:
 
         fails = self.risk.account_checks(equity, positions, notional, symbol)
         fails += self.risk.market_checks(snap, amount)
+        # Exchange minimum order value: the TP1 partial is the smallest order
+        # in the bracket, so IT must clear the minimum, not just the entry.
+        min_notional = getattr(self.broker, "min_notional", lambda s: 0.0)(symbol)
+        tp1_fraction = self.cfg.exits.tp1_fraction
+        smallest = notional * tp1_fraction if tp1_fraction > 0 else notional
+        if min_notional and smallest < min_notional:
+            fails.append(
+                f"position too small for exchange minimums (smallest bracket "
+                f"order {smallest:.0f} < {min_notional:.0f} USDT min) — "
+                "account equity too low for this symbol")
         margin_needed = notional / max(self.cfg.leverage, 1)
         if margin_needed > equity * 0.95:
             fails.append("insufficient margin for position")

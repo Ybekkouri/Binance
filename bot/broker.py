@@ -80,6 +80,11 @@ class LiveBroker:
     def price_to_precision(self, symbol: str, price: float) -> float:
         return float(self.client.price_to_precision(symbol, price))
 
+    def min_notional(self, symbol: str) -> float:
+        """Exchange minimum order value in USDT (0 when unknown)."""
+        limits = self.client.market(symbol).get("limits", {})
+        return float((limits.get("cost") or {}).get("min") or 0.0)
+
     # ---- orders ----
     # Conditional orders (stop-loss / take-profit) on Binance USDS-M route
     # through separate "algo" endpoints in ccxt. Two consequences shape this
@@ -284,6 +289,9 @@ class PaperBroker:
 
     def price_to_precision(self, symbol: str, price: float) -> float:
         return round(price, 6)
+
+    def min_notional(self, symbol: str) -> float:
+        return 0.0  # simulated fills have no exchange minimum
 
     def _fee(self, notional: float) -> float:
         return notional * self.cfg.taker_fee_pct / 100
