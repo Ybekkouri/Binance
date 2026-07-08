@@ -167,6 +167,83 @@ class DataStore:
             out.append(d)
         return out
 
+    def merge_from(self, other_path: str) -> dict:
+        """Import another instance's dataset (snapshots, decisions, trades)
+        into this one, preserving decision->trade links via ID remapping and
+        skipping rows that already exist verbatim.
+
+        This is how several people running the bot pool their learning data:
+        each exports their market_data.db, one person merges them and runs
+        the research tools on the combined history."""
+        src = sqlite3.connect(other_path)
+        added = {"snapshots": 0, "decisions": 0, "trades": 0, "skipped": 0}
+
+        snap_map = {}
+        for row in src.execute(
+                "SELECT id, ts, symbol, candle_time, last_price, "
+                "quote_volume_24h, funding_rate, oi_change_pct, spread_pct, "
+                "book_imbalance, long_short_ratio, taker_buy_sell_ratio, "
+                "btc_trend FROM snapshots"):
+            old_id, rest = row[0], row[1:]
+            dup = self.conn.execute(
+                "SELECT id FROM snapshots WHERE ts=? AND symbol=?",
+                (rest[0], rest[1])).fetchone()
+            if dup:
+                snap_map[old_id] = dup[0]
+                added["skipped"] += 1
+                continue
+            cur = self.conn.execute(
+                "INSERT INTO snapshots (ts, symbol, candle_time, last_price,"
+                " quote_volume_24h, funding_rate, oi_change_pct, spread_pct,"
+                " book_imbalance, long_short_ratio, taker_buy_sell_ratio,"
+                " btc_trend) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rest)
+            snap_map[old_id] = cur.lastrowid
+            added["snapshots"] += 1
+
+        dec_map = {}
+        for row in src.execute(
+                "SELECT id, snapshot_id, ts, symbol, direction, confidence, "
+                "risk_reward, market_condition, entry, stop, tp1, tp2, votes, "
+                "reasons, executed, shadow FROM decisions"):
+            old_id, old_snap, rest = row[0], row[1], row[2:]
+            dup = self.conn.execute(
+                "SELECT id FROM decisions WHERE ts=? AND symbol=? AND "
+                "direction=? AND confidence=?",
+                (rest[0], rest[1], rest[2], rest[3])).fetchone()
+            if dup:
+                dec_map[old_id] = dup[0]
+                added["skipped"] += 1
+                continue
+            cur = self.conn.execute(
+                "INSERT INTO decisions (snapshot_id, ts, symbol, direction,"
+                " confidence, risk_reward, market_condition, entry, stop,"
+                " tp1, tp2, votes, reasons, executed, shadow)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (snap_map.get(old_snap),) + rest)
+            dec_map[old_id] = cur.lastrowid
+            added["decisions"] += 1
+
+        for row in src.execute(
+                "SELECT decision_id, symbol, side, opened_ts, closed_ts, pnl,"
+                " exit_reason, shadow FROM trades"):
+            old_dec, rest = row[0], row[1:]
+            dup = self.conn.execute(
+                "SELECT id FROM trades WHERE symbol=? AND opened_ts=? AND "
+                "closed_ts=? AND pnl=?",
+                (rest[0], rest[2], rest[3], rest[4])).fetchone()
+            if dup:
+                added["skipped"] += 1
+                continue
+            self.conn.execute(
+                "INSERT INTO trades (decision_id, symbol, side, opened_ts,"
+                " closed_ts, pnl, exit_reason, shadow) VALUES (?,?,?,?,?,?,?,?)",
+                (dec_map.get(old_dec),) + rest)
+            added["trades"] += 1
+
+        self.conn.commit()
+        src.close()
+        return added
+
     def counts(self) -> dict:
         out = {}
         for table in ("snapshots", "decisions", "trades"):

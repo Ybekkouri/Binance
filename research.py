@@ -253,6 +253,18 @@ def cmd_history(args) -> None:
         print(f"\nReport written to {args.out}")
 
 
+def cmd_merge(args) -> None:
+    cfg = load_config(args.config, require_keys=False)
+    store = DataStore(cfg.datastore_file)
+    for path in args.files:
+        added = store.merge_from(path)
+        print(f"{path}: +{added['snapshots']} snapshots, "
+              f"+{added['decisions']} decisions, +{added['trades']} trades "
+              f"({added['skipped']} duplicates skipped)")
+    print("\nCombined dataset:", json.dumps(store.counts()))
+    print("Run `python research.py report` to analyze the pooled data.")
+
+
 def cmd_report(args) -> None:
     cfg = load_config(args.config, require_keys=False)
     store = DataStore(cfg.datastore_file)
@@ -277,6 +289,10 @@ def main() -> None:
     p = sub.add_parser("report", help="the complete analysis report")
     p.add_argument("--source", choices=["all", "real", "shadow"], default="all")
     p.add_argument("--out", default=None, help="also write the report to a file")
+
+    p = sub.add_parser("merge", help="pool datasets from other bot instances")
+    p.add_argument("files", nargs="+",
+                   help="market_data.db files from other users/instances")
 
     p = sub.add_parser("history", help="deep history analysis for one pair")
     p.add_argument("--symbol", default="BTC/USDT")
@@ -305,7 +321,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     {"stats": cmd_stats, "collect": cmd_collect, "report": cmd_report,
      "history": cmd_history, "factors": cmd_factors,
-     "compare": cmd_compare}[args.command](args)
+     "compare": cmd_compare, "merge": cmd_merge}[args.command](args)
 
 
 if __name__ == "__main__":

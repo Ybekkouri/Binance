@@ -264,6 +264,28 @@ second period. This is what separates learning from curve-fitting — the
 original prototype in this repo "learned" from its own trades in a circle,
 which is precisely the failure mode this pipeline is built to avoid.
 
+## Sharing the bot & pooling data
+
+Each person runs their **own instance**: own server, own API keys, own
+Telegram bot, own risk settings, own money. Never share `.env`, state files,
+or API keys — the code is the only thing that travels.
+
+Learning data can be pooled: each instance's `market_data.db` is portable,
+and `python research.py merge friend1.db friend2.db` combines datasets
+(decision→trade links preserved, duplicates skipped) so the research tools
+analyze everyone's trades together. What actually multiplies knowledge is
+**diversity** — users on different pairs, timeframes, or thresholds add real
+information; identical clones on the same pairs mostly produce duplicates of
+the same trades. Coordinate who explores what.
+
+Two serious words of caution. First, running the bot on **someone else's
+money or account** (or taking a share of their profits) can constitute
+regulated investment activity in most jurisdictions — sharing code is fine,
+managing other people's funds is a different legal universe; don't cross
+that line casually. Second, anyone you share it with must walk the same
+ladder — paper, testnet, then small — and understands they trade at their
+own risk.
+
 ## Expectations, honestly
 
 The engine's discipline controls *losses*; profits depend on market
