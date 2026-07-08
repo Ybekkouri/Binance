@@ -337,11 +337,36 @@ class Trader:
                                    "orders and shutting down within one cycle.")
             elif cmd == "/status":
                 self.notifier.send(self._status_text())
+            elif cmd == "/senddata":
+                self._send_dataset()
             elif cmd == "/help":
                 self.notifier.send(
                     "/status — positions, equity, today's PnL\n"
+                    "/senddata — receive the research dataset as a file "
+                    "(forward it to whoever merges the pooled data)\n"
                     "/kill — emergency stop: cancel orders, flatten, shut down\n"
                     "/help — this message")
+
+    def _send_dataset(self) -> None:
+        path = self.cfg.datastore_file
+        if not os.path.isfile(path):
+            self.notifier.send("No dataset file yet — the bot hasn't "
+                               "recorded anything.")
+            return
+        counts = self.datastore.counts() if self.datastore else {}
+        caption = ("Research dataset (no keys or secrets inside). "
+                   f"{counts.get('trades', '?')} trades, "
+                   f"{counts.get('decisions', '?')} decisions, "
+                   f"{counts.get('snapshots', '?')} snapshots. "
+                   "Merge with: python3 research.py merge <this file>")
+        if self.notifier.send_document(path, caption):
+            log.info("Dataset sent via Telegram (%d bytes).",
+                     os.path.getsize(path))
+        else:
+            self.notifier.send(
+                "Could not upload the dataset (too large for Telegram's "
+                "~50 MB bot limit, or a network error). Fallback: copy "
+                f"{path} off the server manually.")
 
     def _status_text(self) -> str:
         lines = [f"📊 Status ({self.cfg.mode})"]

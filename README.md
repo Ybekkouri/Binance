@@ -270,13 +270,19 @@ Each person runs their **own instance**: own server, own API keys, own
 Telegram bot, own risk settings, own money. Never share `.env`, state files,
 or API keys — the code is the only thing that travels.
 
-Learning data can be pooled: each instance's `market_data.db` is portable,
-and `python research.py merge friend1.db friend2.db` combines datasets
-(decision→trade links preserved, duplicates skipped) so the research tools
-analyze everyone's trades together. What actually multiplies knowledge is
-**diversity** — users on different pairs, timeframes, or thresholds add real
-information; identical clones on the same pairs mostly produce duplicates of
-the same trades. Coordinate who explores what.
+Learning data can be pooled, and the pipeline is one tap: any contributor
+texts **`/senddata`** to their bot and receives their `market_data.db` as a
+Telegram file (no keys or secrets inside — decisions, snapshots and
+outcomes only), forwards it to whoever runs the merge, and that person runs
+`python research.py merge friend1.db friend2.db` (decision→trade links
+preserved, duplicates skipped, safe to re-run). The research tools then
+analyze everyone's trades together.
+
+What actually multiplies knowledge is **diversity** — users on different
+pairs, timeframes, or thresholds add real information; identical clones on
+the same pairs mostly produce duplicates of the same trades. Coordinate who
+explores what, and analyze each contributor's file with
+`research.py report` before merging if you want per-config comparisons.
 
 Two serious words of caution. First, running the bot on **someone else's
 money or account** (or taking a share of their profits) can constitute

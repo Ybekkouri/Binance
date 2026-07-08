@@ -59,6 +59,31 @@ class Telegram:
         self._sent_once.add(key)
         self.send(text)
 
+    # separate transport hook so tests can intercept file uploads
+    def _api_file(self, method: str, params: dict, path: str) -> dict:
+        with open(path, "rb") as f:
+            r = requests.post(
+                API.format(token=self.token, method=method),
+                data=params, files={"document": f},
+                timeout=60,   # file uploads may legitimately take a while
+            )
+        return r.json()
+
+    def send_document(self, path: str, caption: str = "") -> bool:
+        """Send a file to the configured chat (e.g. the research dataset,
+        so contributors can share data with one forward). Telegram caps
+        bot uploads at ~50 MB."""
+        if not self.enabled:
+            return False
+        try:
+            resp = self._api_file(
+                "sendDocument",
+                {"chat_id": self.chat_id, "caption": caption[:1000]}, path)
+            return bool(resp.get("ok"))
+        except Exception as e:      # noqa: BLE001 — never break trading
+            log.warning("Telegram send_document failed: %s", e)
+            return False
+
     # ---- inbound commands ----
     def poll_commands(self) -> list[str]:
         """Fetch new messages from the configured chat; return command texts."""
@@ -109,6 +134,9 @@ class NullNotifier:
 
     def poll_commands(self) -> list[str]:
         return []
+
+    def send_document(self, path: str, caption: str = "") -> bool:
+        return False
 
 
 def make_notifier(cfg):
