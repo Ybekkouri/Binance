@@ -53,7 +53,7 @@ consider phase 3.
 
 ---
 
-# PHASE 0 — What you need (one-time, ~1 hour total)
+# PHASE 0 — What you need (one-time, ~30 minutes total)
 
 1. **A cloud server** (~$4–6/month). This is a tiny computer in a
    datacenter that stays on 24/7 so your laptop doesn't have to.
@@ -61,58 +61,34 @@ consider phase 3.
    — it shows exactly which buttons to click at Hetzner or DigitalOcean and
    how to connect from your laptop or phone.
 
-2. **The bot installed on it** → **Step 3** of the same guide
-   (two copy-paste blocks).
-
-3. **Your Telegram bot** (free, 5 minutes, done on your phone) →
+2. **Your Telegram bot** (free, 5 minutes, done on your phone) →
    **Step 4** of the same guide. At the end you'll have two codes:
    a *token* and a *chat id*. Keep them handy.
 
 ---
 
-# PHASE 1 — Paper mode: watch it work, risk nothing
+# PHASE 1 — One command installs everything
 
-No Binance account needed. The bot trades a pretend 1,000 USDT on live
-market prices.
-
-**1.** Connect to your server (Termius app on your phone, or `ssh` from a
-laptop) and open the bot's settings file:
+Connect to your server (Termius on your phone, or `ssh` from a laptop) and
+paste this single line:
 
 ```bash
-cd /opt/binance-bot && nano config.yaml
+curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
 
-**2.** Near the top, find the line `mode: testnet` and change it to
-`mode: paper`. Save and exit: press `Ctrl+O`, `Enter`, then `Ctrl+X`.
+It downloads the bot, installs everything, and asks you three questions:
 
-**3.** Add your Telegram codes:
+1. *Telegram bot token* — paste the code from @BotFather
+2. *Telegram chat id* — paste your number
+3. *Binance API key* — **just press Enter** (that starts paper mode:
+   pretend money, real market data — the right way to begin)
 
-```bash
-cp .env.example .env && nano .env
-```
+Then it verifies every connection and starts the bot as a permanent
+service. Your phone buzzes: *"🤖 Engine started (paper)"*. **You're done.**
+Close everything and live your life — the bot reports to your phone.
 
-Fill in the two Telegram lines (leave the Binance ones empty for now).
-Save and exit the same way.
-
-**4.** Check everything:
-
-```bash
-python3 check.py
-```
-
-You want green checkmarks and a test message on your phone. Any ❌ comes
-with a `FIX:` line telling you what to do.
-
-**5.** Make it run forever (auto-starts after reboots and crashes):
-
-```bash
-cp deploy/binance-bot.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now binance-bot
-```
-
-Your phone buzzes: *"🤖 Engine started (paper)"*. **You're done.** Close
-everything and live your life — the bot reports to your phone.
+Re-running that same line later is always safe: it updates the bot to the
+latest version and keeps your settings.
 
 **What to expect:** possibly nothing for hours or even a day or two. The
 strict trader waits for real alignment. The shadow trader will act more
@@ -131,31 +107,30 @@ in (Google/GitHub login works). You get ~15,000 fake USDT automatically.
 **2.** On that page find your **API Key** and **API Secret** (bottom panel,
 "API Key" tab). These are the codes that let the bot trade *that* account.
 
-**3.** On the server, put them into the settings:
+**3.** On the server, add the keys and switch modes — three short commands:
 
 ```bash
 cd /opt/binance-bot && nano .env
 ```
 
 Fill in `BINANCE_API_KEY=` and `BINANCE_SECRET_KEY=` with the testnet
-codes. Save, exit.
-
-**4.** Switch the mode back:
+codes (arrow keys to move; save and exit with `Ctrl+O`, `Enter`, `Ctrl+X`).
 
 ```bash
 nano config.yaml
 ```
 
-Change `mode: paper` to `mode: testnet`. Save, exit.
+Near the top, change `mode: paper` to `mode: testnet`. Save, exit.
 
-**5.** Verify — including a real order test (places a far-away order and
-cancels it instantly; this is the moment you *know* the connection works):
+**4.** Verify — including real order tests (a normal order AND a
+bracket-style stop order, placed far from the market and cancelled
+instantly; this is the moment you *know* everything works):
 
 ```bash
 python3 check.py --order
 ```
 
-**6.** Restart the bot with the new settings:
+**5.** Restart the bot with the new settings:
 
 ```bash
 systemctl restart binance-bot

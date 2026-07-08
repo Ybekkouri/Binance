@@ -7,6 +7,17 @@ The end result: the bot runs day and night in a datacenter, restarts itself
 after crashes and reboots, and messages your phone on Telegram about every
 trade. You can check status or emergency-stop it from anywhere by texting it.
 
+> **The fast path:** after Steps 1, 2 and 4 (server, connection, Telegram
+> bot), ONE command replaces Steps 3 and 5–8 — it installs everything, asks
+> for your codes, verifies, and starts the service:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
+> ```
+>
+> Re-running it later updates the bot and keeps your settings. The steps
+> below remain as the manual path and the reference for what it does.
+
 ---
 
 ## Step 1 — Rent the server (~5 min)
