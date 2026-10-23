@@ -37,6 +37,12 @@ class Telegram:
             log.warning("Telegram enabled in config but TELEGRAM_BOT_TOKEN / "
                         "TELEGRAM_CHAT_ID missing in .env — notifications off.")
 
+    def redact(self, err) -> str:
+        """Error text with the bot token removed: request errors embed the
+        full API URL, and logs get pasted into help requests."""
+        text = str(err)
+        return text.replace(self.token, "***") if self.token else text
+
     # ---- transport (overridable in tests) ----
     def _api(self, method: str, params: dict) -> dict:
         r = requests.post(API.format(token=self.token, method=method),
@@ -50,7 +56,7 @@ class Telegram:
         try:
             self._api("sendMessage", {"chat_id": self.chat_id, "text": text})
         except Exception as e:      # noqa: BLE001 — never break trading
-            log.warning("Telegram send failed: %s", e)
+            log.warning("Telegram send failed: %s", self.redact(e))
 
     def once(self, key: str, text: str) -> None:
         """Send at most once per key (kept in memory; restarts may resend)."""
@@ -81,7 +87,7 @@ class Telegram:
                 {"chat_id": self.chat_id, "caption": caption[:1000]}, path)
             return bool(resp.get("ok"))
         except Exception as e:      # noqa: BLE001 — never break trading
-            log.warning("Telegram send_document failed: %s", e)
+            log.warning("Telegram send_document failed: %s", self.redact(e))
             return False
 
     # ---- inbound commands ----
@@ -93,7 +99,7 @@ class Telegram:
             resp = self._api("getUpdates",
                              {"offset": self.offset, "timeout": 0})
         except Exception as e:      # noqa: BLE001
-            log.warning("Telegram poll failed: %s", e)
+            log.warning("Telegram poll failed: %s", self.redact(e))
             return []
         commands = []
         for upd in resp.get("result", []):
@@ -118,7 +124,7 @@ class Telegram:
             self._api("getUpdates", {"offset": self.offset, "timeout": 0,
                                      "limit": 1})
         except Exception as e:      # noqa: BLE001
-            log.warning("Telegram ack failed: %s", e)
+            log.warning("Telegram ack failed: %s", self.redact(e))
 
 
 class NullNotifier:

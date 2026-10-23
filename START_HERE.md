@@ -62,8 +62,8 @@ consider phase 3.
    how to connect from your laptop or phone.
 
 2. **Your Telegram bot** (free, 5 minutes, done on your phone) →
-   **Step 4** of the same guide. At the end you'll have two codes:
-   a *token* and a *chat id*. Keep them handy.
+   **Step 4** of the same guide. At the end you'll have a *token* from
+   @BotFather. Keep it handy — the installer works out the rest.
 
 ---
 
@@ -76,19 +76,25 @@ paste this single line:
 curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
 
-It downloads the bot, installs everything, and asks you three questions:
+It downloads the bot, installs everything, and asks you a few questions:
 
-1. *Telegram bot token* — paste the code from @BotFather
-2. *Telegram chat id* — paste your number
-3. *Binance API key* — **just press Enter** (that starts paper mode:
+1. *Telegram bot token* — paste the code from @BotFather (it stays hidden
+   while you paste — that's on purpose). The installer checks it with
+   Telegram, then asks you to send your bot any message, and finds your
+   chat by itself. Press Enter instead if you want to skip Telegram.
+2. *Binance API key* — **just press Enter** (that starts paper mode:
    pretend money, real market data — the right way to begin)
+
+On a server you created minutes ago, step 1 of the installer may pause for
+a few minutes while Ubuntu finishes its own first-boot updates. Let it be.
 
 Then it verifies every connection and starts the bot as a permanent
 service. Your phone buzzes: *"🤖 Engine started (paper)"*. **You're done.**
 Close everything and live your life — the bot reports to your phone.
 
-Re-running that same line later is always safe: it updates the bot to the
-latest version and keeps your settings.
+**That same line is your remote control for everything later:** re-run it
+to update the bot, to change your settings (answer `n` when it asks to keep
+them), or to start the bot again after a `/kill`. It is always safe.
 
 **What to expect:** possibly nothing for hours or even a day or two. The
 strict trader waits for real alignment. The shadow trader will act more
@@ -107,33 +113,22 @@ in (Google/GitHub login works). You get ~15,000 fake USDT automatically.
 **2.** On that page find your **API Key** and **API Secret** (bottom panel,
 "API Key" tab). These are the codes that let the bot trade *that* account.
 
-**3.** On the server, add the keys and switch modes — three short commands:
+**3.** On the server, run the install line again:
 
 ```bash
-cd /opt/binance-bot && nano .env
+curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
 
-Fill in `BINANCE_API_KEY=` and `BINANCE_SECRET_KEY=` with the testnet
-codes (arrow keys to move; save and exit with `Ctrl+O`, `Enter`, `Ctrl+X`).
+When it asks *"Keep these settings?"*, answer `n`. Give your Telegram token
+again (or press Enter to skip), then paste the **testnet** API key and
+secret. It switches to testnet mode, checks everything and restarts the bot.
+
+**4.** Prove real orders work — it places a normal order AND a
+bracket-style stop order far from the market and cancels them instantly.
+This is the moment you *know* everything works:
 
 ```bash
-nano config.yaml
-```
-
-Near the top, change `mode: paper` to `mode: testnet`. Save, exit.
-
-**4.** Verify — including real order tests (a normal order AND a
-bracket-style stop order, placed far from the market and cancelled
-instantly; this is the moment you *know* everything works):
-
-```bash
-python3 check.py --order
-```
-
-**5.** Restart the bot with the new settings:
-
-```bash
-systemctl restart binance-bot
+cd /opt/binance-bot && python3 check.py --order
 ```
 
 Phone buzzes: *"🤖 Engine started (testnet)"*. Leave it running for
@@ -168,10 +163,11 @@ Before trading a new coin regularly, check its whole life story first:
 python3 research.py history --symbol ETH/USDT
 ```
 
-**Updating the bot** when improvements are pushed to GitHub:
+**Updating the bot** when improvements are pushed to GitHub — the same
+install line (answer `Y` to keep your settings):
 
 ```bash
-cd /opt/binance-bot && git pull && systemctl restart binance-bot
+curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
 
 ---
@@ -196,23 +192,30 @@ cd /opt/binance-bot && git pull && systemctl restart binance-bot
 Wallets → Transfer → from Spot to USDⓈ-M Futures. Start small — even
 200–500 USDT. The bot's percentages adapt to any size.
 
-**3.** On the server: put the real keys in `.env` (same as before), and in
-`config.yaml` change mode to `live`.
-
-**4.** Run `python3 check.py` — it must pass and show your real balance.
-
-**5.** Going live is deliberately hard to do by accident. Open the service
-file and remove the `#` in front of the marked line:
+**3.** Going live is deliberately a manual step, so it can never happen by
+accident. On the server, open the settings file:
 
 ```bash
-nano /etc/systemd/system/binance-bot.service
+nano /opt/binance-bot/.env
 ```
 
-Find `# Environment=BOT_CONFIRM_LIVE=yes` and delete the leading `# `.
-Save, exit, then:
+(`nano` is a simple editor: arrow keys to move; to save and exit press
+`Ctrl+O`, `Enter`, then `Ctrl+X`.) Make these four lines read:
+
+```
+BINANCE_API_KEY=<your REAL key>
+BINANCE_SECRET_KEY=<your REAL secret>
+BOT_MODE=live
+BOT_CONFIRM_LIVE=yes
+```
+
+**4.** Run `cd /opt/binance-bot && python3 check.py` — it must pass and show
+your real balance.
+
+**5.** Restart the bot:
 
 ```bash
-systemctl daemon-reload && systemctl restart binance-bot
+systemctl restart binance-bot
 ```
 
 Phone: *"🤖 Engine started (live)"*. You are trading. The same daily loss
@@ -225,13 +228,13 @@ protect the real money.
 
 | Problem | What to do |
 |---|---|
-| Want everything stopped NOW | Text **`/kill`** to your bot. Orders cancelled, positions closed, engine off. |
+| Want everything stopped NOW | Text **`/kill`** to your bot. Positions closed, orders cancelled, engine off — and it **stays off**, even after a reboot. If it couldn't close something it tells you and keeps retrying. To start again: re-run the install line. |
 | Phone silent for days | Normal if no trades fired. Text `/status`. No reply? See next row. |
-| Bot not replying | On the server: `systemctl status binance-bot`. If it says "inactive": `systemctl start binance-bot`. |
+| Bot not replying | Re-run the install line (answer `Y` to keep settings) — it checks everything and restarts the bot. |
 | Any ❌ anywhere | `cd /opt/binance-bot && python3 check.py` and follow its FIX lines. |
 | What is it doing right now? | `journalctl -u binance-bot -f` shows the live log (Ctrl+C to leave). |
-| Server rebooted | Nothing to do — the bot auto-starts and remembers its daily limits. |
-| Want to start over in paper mode | Set `mode: paper` in config.yaml, `systemctl restart binance-bot`. |
+| Server rebooted | Nothing to do — the bot auto-starts and remembers its daily limits (unless you had used `/kill`, which keeps it off on purpose). |
+| Want to go back to paper mode | Re-run the install line, answer `n`, and press Enter at the Binance key question. |
 | Locked out / lost the server | Your money is safe on Binance, not the server. Positions keep their exchange-side stops. Log into Binance directly to manage them; delete the API key to cut the bot off entirely. |
 
 **The two numbers that matter if you ever panic:** your money lives on
@@ -260,8 +263,9 @@ protect the real money.
 - **VPS** — the small rented cloud computer the bot lives on.
 - **SSH / Termius** — the way you open the server's terminal from your
   laptop / phone.
-- **`.env` file** — where your secret codes live (never shared, never on GitHub).
-- **`config.yaml`** — the bot's settings: mode, coins, risk percentages.
+- **`.env` file** — your personal settings: secret codes and the mode
+  (paper / testnet / live). Never shared, never on GitHub.
+- **`config.yaml`** — the bot's strategy settings: coins, risk percentages.
 
 ---
 
@@ -274,4 +278,4 @@ protect the real money.
 5. **No strategy earns every day.** The daily target is a stopping rule,
    not a salary. Judge months, not days.
 6. **When in doubt: `/kill` first, questions later.** Restarting costs
-   nothing (`systemctl start binance-bot`).
+   nothing — re-run the install line.

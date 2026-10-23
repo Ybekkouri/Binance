@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import math
+import sqlite3
 import time
 
 import yaml
@@ -52,7 +53,7 @@ from bot.datastore import DataStore
 
 log = logging.getLogger("research")
 
-MIN_SAMPLE_DEFAULT = 20
+MIN_SAMPLE_DEFAULT = 30
 MAX_WEIGHT_SHIFT = 0.25   # a suggestion may move a weight at most +/-25%
 WEIGHT_CAP = 3.0
 
@@ -94,31 +95,40 @@ def factor_table(store: DataStore, source: str = "all") -> dict:
 
 def suggest_weights(table: dict, current_weights: dict,
                     min_trades: int) -> tuple[dict, list]:
-    """Bounded weight suggestions: nudge each factor's weight by its edge
-    over the overall win rate, capped at +/-25%, only with enough sample."""
+    """Bounded, significance-gated weight suggestions.
+
+    A weight moves only when BOTH the aligned trades and the rest have at
+    least `min_trades` each AND the win-rate difference clears a two-sided
+    z-test at 95% (|z| >= 1.96). Even then the move is capped at +/-25%.
+    Factors are correlated and trades are selected on the total score, so
+    a significant edge is still a hint to validate with `compare`, never
+    proof on its own."""
     suggestions = dict(current_weights)
     notes = []
-    total_wins = table["overall_win_rate"] * table["n_trades"]
+    total_wins = round(table["overall_win_rate"] * table["n_trades"])
     for name, s in table["factors"].items():
         if name not in current_weights:
             continue
-        if s["aligned_n"] < min_trades:
-            notes.append(f"{name}: only {s['aligned_n']} aligned trades "
-                         f"(need {min_trades}) — keeping weight")
-            continue
-        # edge vs the DISJOINT complement (trades where the factor was not
-        # aligned) — a baseline containing the subset understates real edges
         comp_n = table["n_trades"] - s["aligned_n"]
-        comp_rate = ((total_wins - s["aligned_wins"]) / comp_n
-                     if comp_n else table["overall_win_rate"])
-        edge = s["aligned_wins"] / s["aligned_n"] - comp_rate
+        comp_w = total_wins - s["aligned_wins"]
+        if s["aligned_n"] < min_trades or comp_n < min_trades:
+            notes.append(f"{name}: {s['aligned_n']} aligned / {comp_n} other "
+                         f"trades (need {min_trades} each) — keeping weight")
+            continue
+        a_rate = s["aligned_wins"] / s["aligned_n"]
+        c_rate = comp_w / comp_n
+        z = analysis.two_prop_z(s["aligned_wins"], s["aligned_n"], comp_w, comp_n)
+        if abs(z) < analysis.Z95:
+            notes.append(f"{name}: {a_rate * 100:.0f}% vs {c_rate * 100:.0f}% "
+                         f"(z={z:+.2f}) — not significant, keeping weight")
+            continue
+        edge = a_rate - c_rate
         shift = max(-MAX_WEIGHT_SHIFT, min(MAX_WEIGHT_SHIFT, edge))
         new = round(min(WEIGHT_CAP, max(0.0, current_weights[name] * (1 + shift))), 2)
         if new != current_weights[name]:
-            notes.append(f"{name}: aligned win rate "
-                         f"{s['aligned_wins'] / s['aligned_n'] * 100:.0f}% vs "
-                         f"{comp_rate * 100:.0f}% when not aligned -> weight "
-                         f"{current_weights[name]} -> {new}")
+            notes.append(f"{name}: aligned win rate {a_rate * 100:.0f}% vs "
+                         f"{c_rate * 100:.0f}% when not aligned (z={z:+.2f}) "
+                         f"-> weight {current_weights[name]} -> {new}")
             suggestions[name] = new
     return suggestions, notes
 
@@ -139,9 +149,9 @@ def cmd_factors(args) -> None:
           f"{counts['shadow_trades']} shadow) — overall win rate "
           f"{table['overall_win_rate'] * 100:.1f}%")
     if args.source == "all" and counts["shadow_trades"] and counts["real_trades"]:
-        print("note: shadow PnL is USDT on the virtual shadow account, so "
-              "magnitudes differ from real trades; win rates are unit-free "
-              "and drive the suggestions.")
+        print("note: real and shadow trades often come from the SAME candles, "
+              "so pooling them double-counts evidence and overstates "
+              "significance. Prefer --source shadow (the default) or real.")
     print()
     header = (f"{'factor':<16}{'aligned n':>10}{'win%':>7}{'pnl':>10}"
               f"{'against n':>11}{'win%':>7}{'pnl':>10}")
@@ -177,33 +187,54 @@ def cmd_factors(args) -> None:
 
 
 # ------------------------------------------------------------ compare
+# Factors that always vote 0 in backtests (no historical order book / OI).
+# Their weights only dilute normalized confidence there, so a candidate that
+# changes them would look better or worse for no real reason.
+BACKTEST_BLIND_FACTORS = ("book_imbalance", "open_interest")
+
+
 def cmd_compare(args) -> None:
     import backtest  # imported here: pulls in ccxt/network only when needed
 
+    cfg_a = load_config(args.config_a, require_keys=False)
+    cfg_b = load_config(args.config_b, require_keys=False)
+    symbol = args.symbol or cfg_a.symbols[0]
+    for cfg in (cfg_a, cfg_b):
+        for f in BACKTEST_BLIND_FACTORS:
+            cfg.strategy.weights[f] = cfg_a.strategy.weights.get(f, 0)
+
+    print(f"Fetching {args.days} days of {symbol} once, used for both configs...")
+    data = backtest.load_data(cfg_a, symbol, args.days)
     results = {}
-    for label, path in (("A (current)", args.config_a),
-                        ("B (candidate)", args.config_b)):
-        cfg = load_config(path, require_keys=False)
-        symbol = args.symbol or cfg.symbols[0]
+    for label, cfg, path in (("A (current)", cfg_a, args.config_a),
+                             ("B (candidate)", cfg_b, args.config_b)):
         print(f"\n=== {label}: {path} on {symbol}, {args.days}d ===")
-        trades, daily, m = backtest.run(cfg, symbol, args.days, args.equity)
+        trades, daily, m = backtest.run(cfg, symbol, args.days, args.equity,
+                                        data=data)
         print(metrics.format_report(m, daily))
         results[label] = m
 
     a, b = results["A (current)"], results["B (candidate)"]
     if a.get("trades") and b.get("trades"):
         print("\n=== VERDICT (B minus A) ===")
-        for key in ("total_pnl", "profit_factor", "sharpe", "sortino",
-                    "max_drawdown_pct", "win_rate_pct"):
+        for key, better in (("total_pnl", "higher"), ("profit_factor", "higher"),
+                            ("sharpe", "higher"), ("sortino", "higher"),
+                            ("max_drawdown_pct", "LOWER"),
+                            ("win_rate_pct", "higher")):
             va, vb = a[key], b[key]
             if not (math.isfinite(va) and math.isfinite(vb)):
                 # e.g. profit factor is inf when a run had zero losers
                 print(f"{key:<18}n/a (A={va:.2f}, B={vb:.2f} — "
                       "too few trades for a meaningful ratio)")
                 continue
-            print(f"{key:<18}{vb - va:+.2f}")
-        print("\nPromote B only if it wins on profit factor and drawdown, "
-              "not just total PnL — and re-check on a second period.")
+            print(f"{key:<18}{vb - va:+.2f}   ({better} is better)")
+        print("\nRead this as a hint, not proof: one symbol, one window, and "
+              "the candidate's weights may have been fitted on this same "
+              "recent period. Promote B only if it wins on profit factor AND "
+              "drawdown here, and again on another symbol (--symbol) or an "
+              "older window (--days with a larger number).")
+        print(f"(Weights of {', '.join(BACKTEST_BLIND_FACTORS)} were held equal: "
+              "backtests have no historical data for them.)")
 
 
 # ------------------------------------------------------------ collect
@@ -257,12 +288,19 @@ def cmd_merge(args) -> None:
     cfg = load_config(args.config, require_keys=False)
     store = DataStore(cfg.datastore_file)
     for path in args.files:
-        added = store.merge_from(path)
+        try:
+            added = store.merge_from(path)
+        except (OSError, ValueError, sqlite3.DatabaseError) as e:
+            print(f"{path}: NOT merged ({e}) — nothing from it was imported.")
+            continue
         print(f"{path}: +{added['snapshots']} snapshots, "
               f"+{added['decisions']} decisions, +{added['trades']} trades "
-              f"({added['skipped']} duplicates skipped)")
+              f"({added['skipped']} already known, skipped)")
+        if added["unlinked"]:
+            print(f"   note: {added['unlinked']} rows lost their link to a "
+                  "decision or snapshot and won't appear in factor analysis")
     print("\nCombined dataset:", json.dumps(store.counts()))
-    print("Run `python research.py report` to analyze the pooled data.")
+    print("Run `python research.py report --source shadow` to analyze it.")
 
 
 def cmd_report(args) -> None:
@@ -305,8 +343,8 @@ def main() -> None:
 
     p = sub.add_parser("factors", help="factor performance & weight suggestions")
     p.add_argument("--min-trades", type=int, default=MIN_SAMPLE_DEFAULT)
-    p.add_argument("--source", choices=["all", "real", "shadow"], default="all",
-                   help="which trades to learn from (default: all)")
+    p.add_argument("--source", choices=["all", "real", "shadow"], default="shadow",
+                   help="which trades to learn from (default: shadow — real and shadow overlap, so pooling double-counts)")
     p.add_argument("--write", default=None,
                    help="write candidate config to this path")
 

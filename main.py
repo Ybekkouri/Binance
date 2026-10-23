@@ -22,7 +22,7 @@ from bot.manager import TradeManager
 from bot.market_data import MarketData
 from bot.notify import make_notifier
 from bot.risk import RiskEngine
-from bot.trader import Track, Trader
+from bot.trader import Track, Trader, stopped_marker
 
 
 def main() -> None:
@@ -38,23 +38,43 @@ def main() -> None:
     )
 
     cfg = load_config(args.config)
+
+    marker = stopped_marker(cfg)
+    if os.path.isfile(marker) and not args.close_all:
+        # The kill switch was used: stay off, even across reboots, until the
+        # owner deliberately restarts (the installer removes this marker).
+        logging.warning("Bot was stopped with the kill switch (%s exists). "
+                        "Re-run the installer to start it again.", marker)
+        raise SystemExit(0)
+
     if cfg.mode == "live" and not args.close_all:
         # Headless servers (systemd) can't type: they must set
-        # BOT_CONFIRM_LIVE=yes explicitly to run live without a prompt.
+        # BOT_CONFIRM_LIVE=yes in .env to run live without a prompt.
         if os.environ.get("BOT_CONFIRM_LIVE") != "yes":
-            answer = input(
-                "mode: live — this trades REAL money on Binance Futures.\n"
-                "Type 'live' to confirm: "
-            )
+            try:
+                answer = input(
+                    "mode: live — this trades REAL money on Binance Futures.\n"
+                    "Type 'live' to confirm: "
+                )
+            except EOFError:
+                # no keyboard (running as a service): refuse clearly, and
+                # with an exit code systemd will not restart-loop on
+                logging.error("Live mode needs BOT_CONFIRM_LIVE=yes in .env "
+                              "when running as a service. Not starting.")
+                raise SystemExit(78)
             if answer.strip().lower() != "live":
                 raise SystemExit("Aborted.")
 
     broker = make_broker(cfg)
     if args.close_all:
-        for symbol in cfg.symbols:
-            broker.cancel_all(symbol)
-        broker.close_all()
-        print("All orders cancelled, all positions closed.")
+        # close first; close_all only cancels orders on symbols it confirmed
+        # flat, so a position that fails to close keeps its stop-loss
+        still_open = broker.close_all()
+        if still_open:
+            print("Could NOT close: " + ", ".join(still_open) +
+                  " — their stop-losses were left in place. Check Binance.")
+            raise SystemExit(1)
+        print("All positions closed and their orders cancelled.")
         return
 
     journal = Journal(cfg.journal_file)

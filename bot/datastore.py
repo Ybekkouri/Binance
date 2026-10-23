@@ -8,6 +8,7 @@ with zero trades.
 """
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 
@@ -169,79 +170,138 @@ class DataStore:
 
     def merge_from(self, other_path: str) -> dict:
         """Import another instance's dataset (snapshots, decisions, trades)
-        into this one, preserving decision->trade links via ID remapping and
-        skipping rows that already exist verbatim.
+        into this one, preserving decision->trade links via ID remapping.
+
+        All-or-nothing: any error rolls the whole file back. Duplicates are
+        detected by MARKET MOMENT, not by wall-clock: two people running the
+        same config see the same candle and make the same decision, and that
+        is one piece of evidence, not two — so it is imported once. Users on
+        different pairs, timeframes or thresholds add genuinely new rows.
 
         This is how several people running the bot pool their learning data:
-        each exports their market_data.db, one person merges them and runs
-        the research tools on the combined history."""
+        each sends their market_data.db (/senddata), one person merges them
+        and runs the research tools on the combined history."""
+        if not os.path.isfile(other_path):
+            raise FileNotFoundError(other_path)
+        mine = self.conn.execute("PRAGMA database_list").fetchone()[2]
+        if mine and os.path.realpath(mine) == os.path.realpath(other_path):
+            raise ValueError("refusing to merge a dataset into itself")
+
         src = sqlite3.connect(other_path)
-        added = {"snapshots": 0, "decisions": 0, "trades": 0, "skipped": 0}
 
-        snap_map = {}
-        for row in src.execute(
-                "SELECT id, ts, symbol, candle_time, last_price, "
-                "quote_volume_24h, funding_rate, oi_change_pct, spread_pct, "
-                "book_imbalance, long_short_ratio, taker_buy_sell_ratio, "
-                "btc_trend FROM snapshots"):
-            old_id, rest = row[0], row[1:]
-            dup = self.conn.execute(
-                "SELECT id FROM snapshots WHERE ts=? AND symbol=?",
-                (rest[0], rest[1])).fetchone()
-            if dup:
-                snap_map[old_id] = dup[0]
-                added["skipped"] += 1
-                continue
-            cur = self.conn.execute(
-                "INSERT INTO snapshots (ts, symbol, candle_time, last_price,"
-                " quote_volume_24h, funding_rate, oi_change_pct, spread_pct,"
-                " book_imbalance, long_short_ratio, taker_buy_sell_ratio,"
-                " btc_trend) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rest)
-            snap_map[old_id] = cur.lastrowid
-            added["snapshots"] += 1
+        def cols(table):
+            return {r[1] for r in src.execute(f"PRAGMA table_info({table})")}
 
-        dec_map = {}
-        for row in src.execute(
-                "SELECT id, snapshot_id, ts, symbol, direction, confidence, "
-                "risk_reward, market_condition, entry, stop, tp1, tp2, votes, "
-                "reasons, executed, shadow FROM decisions"):
-            old_id, old_snap, rest = row[0], row[1], row[2:]
-            dup = self.conn.execute(
-                "SELECT id FROM decisions WHERE ts=? AND symbol=? AND "
-                "direction=? AND confidence=?",
-                (rest[0], rest[1], rest[2], rest[3])).fetchone()
-            if dup:
-                dec_map[old_id] = dup[0]
-                added["skipped"] += 1
-                continue
-            cur = self.conn.execute(
-                "INSERT INTO decisions (snapshot_id, ts, symbol, direction,"
-                " confidence, risk_reward, market_condition, entry, stop,"
-                " tp1, tp2, votes, reasons, executed, shadow)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (snap_map.get(old_snap),) + rest)
-            dec_map[old_id] = cur.lastrowid
-            added["decisions"] += 1
+        def col(name, table, default="0"):
+            # files from older versions may lack columns added later
+            return name if name in cols(table) else f"{default} AS {name}"
 
-        for row in src.execute(
-                "SELECT decision_id, symbol, side, opened_ts, closed_ts, pnl,"
-                " exit_reason, shadow FROM trades"):
-            old_dec, rest = row[0], row[1:]
-            dup = self.conn.execute(
-                "SELECT id FROM trades WHERE symbol=? AND opened_ts=? AND "
-                "closed_ts=? AND pnl=?",
-                (rest[0], rest[2], rest[3], rest[4])).fetchone()
-            if dup:
-                added["skipped"] += 1
-                continue
-            self.conn.execute(
-                "INSERT INTO trades (decision_id, symbol, side, opened_ts,"
-                " closed_ts, pnl, exit_reason, shadow) VALUES (?,?,?,?,?,?,?,?)",
-                (dec_map.get(old_dec),) + rest)
-            added["trades"] += 1
+        added = {"snapshots": 0, "decisions": 0, "trades": 0, "skipped": 0,
+                 "unlinked": 0}
+        try:
+            self.conn.execute("BEGIN")
 
-        self.conn.commit()
-        src.close()
+            snap_map, snap_candle = {}, {}
+            for row in src.execute(
+                    "SELECT id, ts, symbol, candle_time, last_price, "
+                    "quote_volume_24h, funding_rate, oi_change_pct, spread_pct, "
+                    "book_imbalance, long_short_ratio, taker_buy_sell_ratio, "
+                    "btc_trend FROM snapshots"):
+                old_id, rest = row[0], row[1:]
+                ts, symbol, candle = rest[0], rest[1], rest[2]
+                snap_candle[old_id] = candle
+                if candle:
+                    dup = self.conn.execute(
+                        "SELECT id FROM snapshots WHERE symbol=? AND candle_time=?",
+                        (symbol, candle)).fetchone()
+                else:
+                    dup = self.conn.execute(
+                        "SELECT id FROM snapshots WHERE ts=? AND symbol=?",
+                        (ts, symbol)).fetchone()
+                if dup:
+                    snap_map[old_id] = dup[0]
+                    added["skipped"] += 1
+                    continue
+                cur = self.conn.execute(
+                    "INSERT INTO snapshots (ts, symbol, candle_time, last_price,"
+                    " quote_volume_24h, funding_rate, oi_change_pct, spread_pct,"
+                    " book_imbalance, long_short_ratio, taker_buy_sell_ratio,"
+                    " btc_trend) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rest)
+                snap_map[old_id] = cur.lastrowid
+                added["snapshots"] += 1
+
+            dec_map, dec_was_dup = {}, {}
+            for row in src.execute(
+                    "SELECT id, snapshot_id, ts, symbol, direction, confidence, "
+                    "risk_reward, market_condition, entry, stop, tp1, tp2, votes, "
+                    f"reasons, {col('executed', 'decisions')}, "
+                    f"{col('shadow', 'decisions')} FROM decisions"):
+                old_id, old_snap, rest = row[0], row[1], row[2:]
+                ts, symbol, direction, conf = rest[0], rest[1], rest[2], rest[3]
+                shadow = rest[13]
+                candle = snap_candle.get(old_snap)
+                if candle:
+                    dup = self.conn.execute(
+                        "SELECT d.id FROM decisions d JOIN snapshots s "
+                        "ON s.id = d.snapshot_id WHERE d.symbol=? AND "
+                        "s.candle_time=? AND d.direction=? AND d.shadow=? AND "
+                        "ROUND(d.confidence, 4)=ROUND(?, 4)",
+                        (symbol, candle, direction, shadow, conf)).fetchone()
+                else:
+                    dup = self.conn.execute(
+                        "SELECT id FROM decisions WHERE ts=? AND symbol=? AND "
+                        "direction=? AND shadow=? AND "
+                        "ROUND(confidence, 4)=ROUND(?, 4)",
+                        (ts, symbol, direction, shadow, conf)).fetchone()
+                if dup:
+                    dec_map[old_id] = dup[0]
+                    dec_was_dup[old_id] = True
+                    added["skipped"] += 1
+                    continue
+                new_snap = snap_map.get(old_snap)
+                if old_snap is not None and new_snap is None:
+                    added["unlinked"] += 1
+                cur = self.conn.execute(
+                    "INSERT INTO decisions (snapshot_id, ts, symbol, direction,"
+                    " confidence, risk_reward, market_condition, entry, stop,"
+                    " tp1, tp2, votes, reasons, executed, shadow)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (new_snap,) + rest)
+                dec_map[old_id] = cur.lastrowid
+                added["decisions"] += 1
+
+            for row in src.execute(
+                    "SELECT decision_id, symbol, side, opened_ts, closed_ts, pnl,"
+                    f" exit_reason, {col('shadow', 'trades')} FROM trades"):
+                old_dec, rest = row[0], row[1:]
+                symbol, side, opened, closed, pnl, shadow = (
+                    rest[0], rest[1], rest[2], rest[3], rest[4], rest[6])
+                new_dec = dec_map.get(old_dec)
+                if dec_was_dup.get(old_dec) and self.conn.execute(
+                        "SELECT 1 FROM trades WHERE decision_id=?",
+                        (new_dec,)).fetchone():
+                    added["skipped"] += 1   # same decision, already has its outcome
+                    continue
+                if self.conn.execute(
+                        "SELECT 1 FROM trades WHERE symbol=? AND side=? AND "
+                        "opened_ts=? AND closed_ts=? AND pnl=? AND shadow=?",
+                        (symbol, side, opened, closed, pnl, shadow)).fetchone():
+                    added["skipped"] += 1
+                    continue
+                if old_dec is not None and new_dec is None:
+                    added["unlinked"] += 1
+                self.conn.execute(
+                    "INSERT INTO trades (decision_id, symbol, side, opened_ts,"
+                    " closed_ts, pnl, exit_reason, shadow) VALUES (?,?,?,?,?,?,?,?)",
+                    (new_dec,) + rest)
+                added["trades"] += 1
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            src.close()
         return added
 
     def counts(self) -> dict:

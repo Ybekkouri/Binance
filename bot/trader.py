@@ -27,6 +27,11 @@ from . import strategy
 from .decision import LONG, NO_TRADE
 
 
+def stopped_marker(cfg) -> str:
+    """Path of the marker that keeps the bot off after a kill switch."""
+    return os.path.join(os.path.dirname(cfg.kill_file) or ".", "STOPPED")
+
+
 def sd_notify(message: str) -> None:
     """Ping systemd (READY=1 / WATCHDOG=1). No-op outside systemd.
 
@@ -70,6 +75,7 @@ class Track:
         self.notifier = notifier
         self.events = events
         self.last_eval_candle: dict = {}
+        self.entry_failures: dict = {}   # (symbol, candle) -> failed attempts
 
     def process(self, snap, snapshot_id=None) -> None:
         symbol = snap.symbol
@@ -142,11 +148,16 @@ class Track:
         if self.events is not None:
             fails += self.events.check(snap)
         # Exchange minimum order value: the TP1 partial is the smallest order
-        # in the bracket, so IT must clear the minimum, not just the entry.
+        # in the bracket, so IT must clear the minimum — measured on the
+        # ROUNDED size actually sent, not the unrounded fraction.
+        tp1_amount = self.broker.amount_to_precision(
+            symbol, amount * self.cfg.exits.tp1_fraction
+        ) if self.cfg.exits.tp1_fraction > 0 else 0.0
         min_notional = getattr(self.broker, "min_notional", lambda s: 0.0)(symbol)
-        tp1_fraction = self.cfg.exits.tp1_fraction
-        smallest = notional * tp1_fraction if tp1_fraction > 0 else notional
-        if min_notional and smallest < min_notional:
+        smallest = (tp1_amount if tp1_amount > 0 else amount) * decision.entry_price
+        if self.cfg.exits.tp1_fraction > 0 and tp1_amount <= 0:
+            fails.append("TP1 partial rounds to zero — position too small")
+        elif min_notional and smallest < min_notional:
             fails.append(
                 f"position too small for exchange minimums (smallest bracket "
                 f"order {smallest:.0f} < {min_notional:.0f} USDT min) — "
@@ -160,9 +171,6 @@ class Track:
             return
 
         decision.position_size = amount
-        tp1_amount = self.broker.amount_to_precision(
-            symbol, amount * self.cfg.exits.tp1_fraction
-        )
 
         log.info(
             "[%s] ENTER %s %s: size %s @ ~%.2f, SL %.2f, TP1 %.2f, TP2 %.2f, "
@@ -177,6 +185,10 @@ class Track:
             "tp1": decision.take_profit_1, "tp1_amount": tp1_amount,
             "tp2": decision.take_profit_2,
         }
+        candle_key = (symbol, str(snap.candles.index[-1])
+                      if len(snap.candles) else "")
+        # a few seconds of slack covers clock skew vs Binance timestamps
+        opened_ms = int(time.time() * 1000) - 5000
         try:
             response = self.broker.enter(symbol, request["side"], amount,
                                          decision.stop_loss,
@@ -188,7 +200,8 @@ class Track:
                 self.datastore.mark_executed(decision_id)
             self.manager.on_entry(decision, amount, equity,
                                   decision_id=decision_id,
-                                  sl_order_id=response.get("sl_order_id"))
+                                  sl_order_id=response.get("sl_order_id"),
+                                  opened_ms=opened_ms)
             if self.notifier is not None and (
                     not self.is_shadow or self.cfg.telegram_notify_shadow):
                 tag = "" if not self.is_shadow else " [shadow]"
@@ -201,12 +214,41 @@ class Track:
                     f"confidence {decision.confidence:.2f}, RR {decision.risk_reward:.1f}")
         except (ccxt.BaseError, RuntimeError) as e:
             self.journal.error("execution", f"[{self.name}] {symbol}: {e}")
-            # allow a retry on the next tick of the same candle — the signal
-            # is still valid and the failure may have been transient
-            self.last_eval_candle.pop(symbol, None)
+            self._adopt_leftover(decision, symbol, equity, decision_id,
+                                 opened_ms)
+            # One retry per candle: a transient failure deserves a second
+            # chance, but a deterministic rejection must not become an
+            # enter-and-flatten loop paying fees every 30 seconds.
+            failures = self.entry_failures.get(candle_key, 0) + 1
+            self.entry_failures = {candle_key: failures}
+            if failures < 2:
+                self.last_eval_candle.pop(symbol, None)
             if not self.is_shadow:
                 raise           # real-track errors bubble up to the loop
             log.exception("[shadow] entry failed on %s", symbol)
+
+    def _adopt_leftover(self, decision, symbol, equity, decision_id,
+                        opened_ms) -> None:
+        """If a failed entry left a position behind (fill succeeded, bracket
+        and flatten failed), take ownership of it so the manager restores
+        its stop on the next tick instead of ignoring it as 'unmanaged'."""
+        try:
+            pos = next((p for p in self.broker.open_positions()
+                        if p["symbol"] == symbol), None)
+        except Exception:               # noqa: BLE001
+            return
+        if pos is None or symbol in self.risk.state.managed:
+            return
+        log.warning("[%s] failed entry left a %s position on %s — adopting "
+                    "it and restoring its stop.", self.name, pos["side"], symbol)
+        self.manager.on_entry(decision, pos["contracts"], equity,
+                              decision_id=decision_id, opened_ms=opened_ms,
+                              needs_protection=True)
+        if self.notifier is not None and not self.is_shadow:
+            self.notifier.send(
+                f"⚠️ Entry on {symbol} failed part-way and left an open "
+                "position. The bot has taken control of it and is placing "
+                "its stop-loss now.")
 
 
 class Trader:
@@ -247,7 +289,10 @@ class Trader:
         try:
             while True:
                 if self._kill_requested():
-                    self._shutdown("kill switch file detected")
+                    if not self._shutdown("kill switch", persistent=True):
+                        # flatten failed: exit non-zero so systemd restarts
+                        # us and the kill (file still present) is retried
+                        raise SystemExit(1)
                     return
                 self.tick()
                 time.sleep(self.cfg.poll_seconds)
@@ -266,6 +311,7 @@ class Trader:
             return
 
         for symbol in self.cfg.symbols:
+            sd_notify("WATCHDOG=1")   # a slow tick must not trip the watchdog
             try:
                 self._process_symbol(symbol, btc_trend)
             except ccxt.NetworkError as e:
@@ -283,6 +329,12 @@ class Trader:
         if snap.age_seconds() > self.cfg.max_stale_data_seconds:
             self.journal.error("data", f"stale snapshot for {symbol}")
             return
+
+        # Shock detection runs on EVERY candle, before either track and
+        # regardless of whether anything wants to trade.
+        events = self.real.events
+        if events is not None:
+            events.observe(snap)
 
         # One snapshot row per closed candle feeds both tracks' decisions.
         snapshot_id = None
@@ -308,18 +360,22 @@ class Trader:
         if self._summary_date == today:
             return
         self._summary_date = today
-        lines = [f"🌅 Daily report — {self.cfg.mode}"]
+        yesterday = (_dt.datetime.now(_dt.timezone.utc)
+                     - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        lines = [f"🌅 Daily report for {yesterday} ({self.cfg.mode})"]
         for track in filter(None, [self.real, self.shadow]):
             st = track.risk.state
-            if st.date == today:                # already rolled; nothing held
-                continue
-            lines.append(
-                f"[{track.name}] {st.date}: {st.daily_pnl:+.2f} USDT over "
-                f"{st.trades_today} trade(s)"
-                + (f", {st.consecutive_losses} loss streak"
-                   if st.consecutive_losses else ""))
-        if len(lines) > 1:
-            self.notifier.send("\n".join(lines))
+            # risk state only rolls on activity, so its date tells us whether
+            # yesterday actually saw any; an older date means a quiet day
+            if st.date == yesterday:
+                lines.append(
+                    f"[{track.name}] {st.daily_pnl:+.2f} USDT over "
+                    f"{st.trades_today} trade(s)"
+                    + (f", {st.consecutive_losses} loss streak"
+                       if st.consecutive_losses else ""))
+            else:
+                lines.append(f"[{track.name}] no trades")
+        self.notifier.send("\n".join(lines))
 
     def _handle_commands(self) -> None:
         commands = self.notifier.poll_commands()
@@ -392,31 +448,44 @@ class Trader:
     def _kill_requested(self) -> bool:
         return os.path.isfile(self.cfg.kill_file)
 
-    def _shutdown(self, why: str) -> None:
+    def _shutdown(self, why: str, persistent: bool = False) -> bool:
+        """Stop trading. Returns True on a clean stop, False when positions
+        could not be flattened (the caller then exits non-zero so systemd
+        restarts the bot and the kill is retried).
+
+        persistent=True (the kill switch) also writes a STOPPED marker so a
+        reboot or crash-restart does NOT silently resume trading."""
         log.warning("Shutdown: %s", why)
         self.journal.write("shutdown", reason=why,
                            close_positions=self.cfg.close_positions_on_kill)
-        try:
-            if self.cfg.close_positions_on_kill:
-                # flattening cancels all orders too
-                self.real.broker.close_all()
-                log.warning("All real positions flattened. "
-                            "(Shadow positions are virtual and persist.)")
-            else:
-                # positions stay open — their exchange-side brackets MUST
-                # stay too, so cancel nothing
-                log.warning("Positions left open, exchange-side brackets "
-                            "left in place.")
-        except ccxt.BaseError:
-            log.exception("Error during emergency shutdown — check the exchange!")
-            self.notifier.send("⚠️ Error during emergency shutdown — CHECK "
-                               "THE EXCHANGE MANUALLY for open positions!")
+        still_open = []
+        if self.cfg.close_positions_on_kill:
+            try:
+                still_open = self.real.broker.close_all() or []
+            except Exception as e:      # noqa: BLE001
+                log.exception("close_all failed")
+                still_open = [f"unknown ({e})"]
+        if still_open:
+            self.notifier.send(
+                "⚠️ Emergency stop could NOT close: "
+                f"{', '.join(map(str, still_open))}. Their stop-losses are "
+                "still on Binance. Retrying automatically — also check the "
+                "Binance app yourself.")
+            return False
+
         if os.path.isfile(self.cfg.kill_file):
             os.remove(self.cfg.kill_file)
-        self.notifier.send(f"🤖 Engine stopped ({why}). "
-                           + ("Real positions flattened."
-                              if self.cfg.close_positions_on_kill else
-                              "Positions left open with exchange-side brackets."))
+        if persistent:
+            with open(stopped_marker(self.cfg), "w") as f:
+                f.write(f"stopped by {why}\n")
+        self.notifier.send(
+            f"🤖 Engine stopped ({why}). "
+            + ("All real positions closed."
+               if self.cfg.close_positions_on_kill else
+               "Positions left open with their exchange-side stops.")
+            + (" It will stay off — even after a reboot — until you restart "
+               "it by re-running the installer line." if persistent else ""))
+        return True
 
     def _data_failure(self, message: str) -> None:
         self.data_failures += 1

@@ -82,6 +82,13 @@ stay protected by their exchange-side brackets. For events known in advance
 trades open inside them. Deliberately not a headline-sentiment trader:
 standing aside during chaos is the edge that survives fake news.
 
+## Tests
+
+`python3 tests/test_bot.py` runs the offline suite (no network, no keys):
+strategy, risk limits, paper and live broker behaviour (against a fake
+exchange), stop replacement, kill switch, event guard, statistics, dataset
+merging and backtest parity. Run it after any change.
+
 ## Setup
 
 ```bash
@@ -122,13 +129,14 @@ neutral in backtests (no historical data), which only makes backtests more
 conservative than live. To compare strategies, copy `config.yaml`, change
 parameters, and run with `--config variant.yaml`.
 
-**2. Paper trade** (`mode: paper`) — live market data, simulated fills with
+**2. Paper trade** (`BOT_MODE=paper` in `.env`) — live market data, simulated fills with
 fees and slippage, no keys, no risk. State persists in `paper_state.json`.
 
-**3. Testnet** (`mode: testnet`, the default) — real order flow against
+**3. Testnet** (`BOT_MODE=testnet`) — real order flow against
 Binance's futures testnet (free keys at <https://testnet.binancefuture.com>).
 
-**4. Live** (`mode: live`) — requires typing `live` at startup. Restrict API
+**4. Live** (`BOT_MODE=live`) — requires typing `live` at startup, or
+`BOT_CONFIRM_LIVE=yes` in `.env` when running as a service. Restrict API
 keys to futures trading + your IP, withdrawals disabled.
 
 Run any mode with:
@@ -256,7 +264,10 @@ survive. Then validate the strategy itself on recent data with `backtest.py`.
 
 The learning discipline, in order: **collect → measure → suggest → validate
 out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),
-require a minimum sample (20 aligned trades per factor), and are written to a
+require at least 30 trades both with and without the factor, move a weight
+only when the difference is statistically significant (95% z-test), learn
+from the shadow track by default (real and shadow trades share candles, so
+pooling them double-counts evidence), and are written to a
 *candidate* file — never applied automatically. `compare` backtests the
 candidate against the current config on the same data; promote it only if it
 wins on profit factor and drawdown, not just total PnL, and re-check on a

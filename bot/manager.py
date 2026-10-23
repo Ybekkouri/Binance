@@ -38,7 +38,8 @@ class TradeManager:
         self.notifier = notifier
 
     def on_entry(self, decision, amount: float, equity: float,
-                 decision_id=None, sl_order_id=None) -> None:
+                 decision_id=None, sl_order_id=None, opened_ms=None,
+                 needs_protection: bool = False) -> None:
         info = {
             "side": "long" if decision.direction == LONG else "short",
             "entry": decision.entry_price,
@@ -49,10 +50,13 @@ class TradeManager:
             "amount": amount,
             "risk_dist": abs(decision.entry_price - decision.stop_loss),
             "breakeven_done": False,
-            "opened_ms": int(time.time() * 1000),
+            # captured BEFORE the entry order by the caller, so the entry
+            # commission falls inside the PnL window
+            "opened_ms": opened_ms or int(time.time() * 1000),
             "decision_id": decision_id,
             "sl_order_id": sl_order_id,
             "settle_attempts": 0,
+            "needs_protection": needs_protection,
         }
         self.risk.record_open(decision.symbol, info, equity)
         self.journal.position("opened", decision.symbol, track=self.track, **info)
@@ -93,6 +97,21 @@ class TradeManager:
         atr = float(ta.atr(snap.candles, self.cfg.strategy.atr_period).iloc[-1])
         r_gain = sign * (price - info["entry"]) / info["risk_dist"]
 
+        # 0. Re-protection: a stop that failed to place (outage during entry
+        # or a stop move) is retried every tick until it sticks.
+        if info.get("needs_protection"):
+            try:
+                info["sl_order_id"] = self.broker.place_stop(
+                    symbol, side, info["stop"], position["contracts"])
+                info["needs_protection"] = False
+                self.risk.save()
+                self.journal.position("reprotected", symbol, stop=info["stop"])
+                if self.notifier is not None and not self.is_shadow:
+                    self.notifier.send(
+                        f"✅ Stop-loss restored on {symbol} at {info['stop']:.2f}.")
+            except Exception as e:      # noqa: BLE001 — keep trying next tick
+                log.warning("re-protect %s failed: %s", symbol, e)
+
         # 1. Liquidation proximity: flatten rather than flirt with liquidation.
         liq = position.get("liquidation_price") or 0
         if liq > 0 and abs(price - liq) < LIQ_ATR_BUFFER * atr:
@@ -118,11 +137,13 @@ class TradeManager:
                 self._settle(symbol, info, reason="invalidation")
                 return
 
-        # 3. Breakeven: once +breakeven_at_r, stop goes to entry.
+        # 3. Breakeven: once +breakeven_at_r, stop goes to entry. Marked done
+        # only after the exchange accepts the new stop, so a failure retries.
         new_stop = None
+        breakeven_now = False
         if not info["breakeven_done"] and r_gain >= self.cfg.exits.breakeven_at_r:
             new_stop = info["entry"]
-            info["breakeven_done"] = True
+            breakeven_now = True
 
         # 4. Trailing: after TP1 territory, ratchet the stop by ATR.
         if r_gain >= self.cfg.exits.tp1_r:
@@ -134,15 +155,26 @@ class TradeManager:
                     (max(new_stop, trail) if side == "long" else min(new_stop, trail))
 
         if new_stop is not None and not math.isclose(new_stop, info["stop"]):
-            new_id = self.broker.replace_stop(
-                symbol, side, new_stop,
-                old_order_id=info.get("sl_order_id"),
-                old_stop=info["stop"])
+            try:
+                new_id = self.broker.replace_stop(
+                    symbol, side, new_stop,
+                    old_order_id=info.get("sl_order_id"),
+                    old_stop=info["stop"],
+                    amount=position["contracts"])
+            except Exception as e:      # noqa: BLE001
+                # The new stop wasn't placed; the old stop is still live
+                # (it is placed before the old one is cancelled), so nothing
+                # is unprotected. Retry next tick.
+                log.warning("stop move on %s failed, will retry: %s", symbol, e)
+                self.journal.error("stop_move", f"{symbol}: {e}")
+                return
             self.journal.position("stop_moved", symbol,
                                   old_stop=info["stop"], new_stop=new_stop,
                                   r_gain=round(r_gain, 2))
             info["stop"] = new_stop
             info["sl_order_id"] = new_id
+            if breakeven_now:
+                info["breakeven_done"] = True
             self.risk.save()
 
     def _exit_reason(self, symbol: str) -> str:

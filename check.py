@@ -65,7 +65,8 @@ def main() -> None:
         ok("BINANCE_API_KEY and BINANCE_SECRET_KEY found in .env")
     else:
         bad("Binance API keys missing",
-            "copy .env.example to .env and fill the keys in "
+            "re-run the installer and enter your keys, or edit "
+            "/opt/binance-bot/.env "
             "(testnet keys from https://testnet.binancefuture.com)")
 
     # 3 ---- public market data
@@ -160,9 +161,10 @@ def main() -> None:
     if not cfg.telegram_enabled:
         warn("telegram disabled in config.yaml — you'll have no phone alerts")
     elif not (cfg.telegram_token and cfg.telegram_chat_id):
-        bad("telegram enabled but TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID "
-            "missing in .env",
-            "follow the Telegram section of docs/VPS_SETUP.md")
+        # skipping Telegram is a valid choice, not a failure
+        warn("no Telegram token/chat id in .env — the bot will run but "
+             "you'll get no phone alerts. To add them later, re-run the "
+             "installer (see START_HERE.md)")
     else:
         try:
             from bot.notify import Telegram
@@ -178,7 +180,8 @@ def main() -> None:
                     "token or chat id is wrong; redo the BotFather steps in "
                     "docs/VPS_SETUP.md and make sure you messaged your bot once")
         except Exception as e:                               # noqa: BLE001
-            bad(f"telegram unreachable: {e}", "check internet connection")
+            bad(f"telegram unreachable: {tg.redact(e)}",
+                "check internet connection")
 
     finish()
 

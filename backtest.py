@@ -16,6 +16,7 @@ No API keys needed — public market data only.
 """
 
 import argparse
+import math
 import logging
 
 import ccxt
@@ -122,7 +123,15 @@ class SimRisk:
 
 # ------------------------------------------------------------ engine
 def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
-                 btc_trend_lookup, funding: pd.Series, start_equity: float):
+                 btc_trend_lookup, funding: pd.Series, start_equity: float,
+                 min_notional: float = 0.0, amount_step: float = 0.0):
+    """Bar-by-bar simulation mirroring the live engine: same strategy,
+    sizing, risk limits, shock guard, exchange-minimum guard, brackets,
+    breakeven, trailing (incl. minimum step) and invalidation exits.
+
+    Intra-bar order is unknowable from OHLC, so conflicts resolve the
+    conservative way: the stop is checked first, and a stop gapped through
+    at the open fills at the (worse) open."""
     st, exi = cfg.strategy, cfg.exits
     if len(df) < 2 or len(trend_df) < 2:
         return pd.DataFrame(), pd.Series(dtype=float)
@@ -139,6 +148,10 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
     # 24h rolling quote volume, approximated from base candles
     bars_per_day = max(1, int(24 / bar_hours))
     quote_vol = (df["volume"] * df["close"]).rolling(bars_per_day).sum()
+    # shock guard: same rule as live (bot/events.py), cooldown in bars
+    cooldown_bars = max(1, int(cfg.events.shock_cooldown_minutes * 60
+                               / base_delta.total_seconds()))
+    shock_until_bar = -1
 
     equity = start_equity
     sim = SimRisk(cfg, equity)
@@ -149,6 +162,25 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
     warmup = max(st.ema_slow, st.swing_lookback, st.breakout_lookback,
                  st.volume_ma, st.atr_period) + 2
 
+    def snapshot_at(i, bar_close_time):
+        n_trend = trend_close_times.searchsorted(bar_close_time, side="right")
+        if n_trend < st.trend_ema_slow + 2:
+            return None
+        bar = df.iloc[i]
+        fr = funding_at_bar.iloc[i]
+        qv = quote_vol.iloc[i]
+        return MarketSnapshot(
+            symbol=cfg.symbols[0],
+            candles=df.iloc[max(0, i - WINDOW):i + 1],
+            trend_candles=trend_df.iloc[max(0, n_trend - 200):n_trend],
+            last_price=float(bar["close"]),
+            quote_volume_24h=float(qv) if qv == qv else 0.0,
+            funding_rate=float(fr) if fr == fr else None,
+            oi_change_pct=None,
+            book=None,
+            btc_trend=btc_trend_lookup(bar_close_time),
+        )
+
     for i in range(warmup, len(df)):
         bar = df.iloc[i]
         ts = df.index[i]
@@ -157,6 +189,12 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
         day = ts.strftime("%Y-%m-%d")
         day_pnl.setdefault(day, 0.0)
         a = float(atr_full.iloc[i])
+
+        # shock detection runs on every bar, like EventGuard.observe()
+        prev_atr = float(atr_full.iloc[i - 1])
+        if prev_atr > 0 and (float(bar["high"]) - float(bar["low"])) \
+                >= cfg.events.shock_atr_mult * prev_atr:
+            shock_until_bar = i + cooldown_bars
 
         # ---- manage open position ----
         if position is not None:
@@ -190,47 +228,57 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
                     position = None
 
             hi, lo = float(bar["high"]), float(bar["low"])
+            op = float(bar["open"])
             hit = lambda level, above: hi >= level if above else lo <= level
             if hit(p["stop"], above=p["side"] == "short"):
-                fill(p["stop"], p["contracts"], "stop_loss")          # SL first: conservative
-            elif not p["tp1_filled"] and hit(p["tp1"], above=p["side"] == "long"):
-                fill(p["tp1"], p["tp1_amount"], "take_profit_1")
-                if position:
-                    p["tp1_filled"] = True
-            elif hit(p["tp2"], above=p["side"] == "long"):
-                fill(p["tp2"], p["contracts"], "take_profit_2")
+                # gapped through at the open -> fill at the worse open
+                stop_fill = min(p["stop"], op) if sign > 0 else max(p["stop"], op)
+                fill(stop_fill, p["contracts"], "stop_loss")
+            else:
+                if not p["tp1_filled"] and hit(p["tp1"], above=p["side"] == "long"):
+                    fill(p["tp1"], p["tp1_amount"], "take_profit_1")
+                    if position:
+                        p["tp1_filled"] = True
+                # like live, TP2 is re-checked right after a TP1 partial
+                if position is not None and hit(p["tp2"], above=p["side"] == "long"):
+                    fill(p["tp2"], p["contracts"], "take_profit_2")
 
             if position is not None:
                 close = float(bar["close"])
-                r_gain = sign * (close - p["entry"]) / p["risk_dist"]
+                # invalidation: a confident opposing signal exits at the close
+                if exi.exit_on_opposing_signal:
+                    snap = snapshot_at(i, bar_close_time)
+                    if snap is not None:
+                        d = strategy.decide(snap, cfg)
+                        if d.direction != NO_TRADE and \
+                                (d.direction == LONG) != (sign > 0):
+                            fill(close, p["contracts"], "invalidation")
+                            continue
+                # breakeven / trailing, same rules as bot/manager.py
+                r_gain = sign * (close - p["ref_entry"]) / p["risk_dist"]
+                new_stop = None
                 if not p["breakeven_done"] and r_gain >= exi.breakeven_at_r:
-                    p["stop"] = p["entry"]
+                    new_stop = p["ref_entry"]
                     p["breakeven_done"] = True
                 if r_gain >= exi.tp1_r:
                     trail = close - sign * a * exi.trail_atr_mult
-                    if (trail > p["stop"]) == (sign > 0) and trail != p["stop"]:
-                        p["stop"] = trail
+                    better = trail > p["stop"] if sign > 0 else trail < p["stop"]
+                    min_step = p["stop"] * exi.trail_min_step_pct / 100
+                    if better and abs(trail - p["stop"]) >= min_step:
+                        new_stop = trail if new_stop is None else \
+                            (max(new_stop, trail) if sign > 0 else min(new_stop, trail))
+                if new_stop is not None:
+                    p["stop"] = new_stop
             continue  # never evaluate a new entry on a bar we were in a trade
 
         # ---- evaluate entry ----
         if not sim.can_open(equity):
             continue
-        n_trend = trend_close_times.searchsorted(bar_close_time, side="right")
-        if n_trend < st.trend_ema_slow + 2:
+        if i <= shock_until_bar:
+            continue                      # shock cooldown, as live
+        snap = snapshot_at(i, bar_close_time)
+        if snap is None:
             continue
-        snap = MarketSnapshot(
-            symbol=cfg.symbols[0],
-            candles=df.iloc[max(0, i - WINDOW):i + 1],
-            trend_candles=trend_df.iloc[max(0, n_trend - 200):n_trend],
-            last_price=float(bar["close"]),
-            quote_volume_24h=float(quote_vol.iloc[i]) if quote_vol.iloc[i] == quote_vol.iloc[i] else 0.0,
-            funding_rate=(float(funding_at_bar.iloc[i])
-                          if funding_at_bar.iloc[i] == funding_at_bar.iloc[i]
-                          else None),
-            oi_change_pct=None,
-            book=None,
-            btc_trend=btc_trend_lookup(ts),
-        )
         decision = strategy.decide(snap, cfg)
         if decision.direction == NO_TRADE:
             continue
@@ -239,8 +287,19 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
 
         amount = size_position(cfg, equity, decision.entry_price,
                                decision.stop_loss, [])
+        if amount_step > 0:
+            amount = math.floor(amount / amount_step) * amount_step
         if amount <= 0:
             continue
+        tp1_amount = amount * exi.tp1_fraction
+        if amount_step > 0 and exi.tp1_fraction > 0:
+            tp1_amount = math.floor(tp1_amount / amount_step) * amount_step
+            if tp1_amount <= 0:
+                continue
+        smallest = (tp1_amount if exi.tp1_fraction > 0 else amount) \
+            * decision.entry_price
+        if min_notional and smallest < min_notional:
+            continue                      # exchange minimum, as live
         sign = 1 if decision.direction == LONG else -1
         entry_fill = decision.entry_price * (1 + sign * slip_pct)
         fee = entry_fill * amount * fee_pct
@@ -249,12 +308,14 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
         position = {
             "side": "long" if sign > 0 else "short",
             "contracts": amount,
-            "tp1_amount": amount * exi.tp1_fraction,
+            "tp1_amount": tp1_amount,
             "entry": entry_fill,
+            # live manages breakeven/trailing off the signal price
+            "ref_entry": decision.entry_price,
             "stop": decision.stop_loss,
             "tp1": decision.take_profit_1,
             "tp2": decision.take_profit_2,
-            "risk_dist": abs(entry_fill - decision.stop_loss),
+            "risk_dist": abs(decision.entry_price - decision.stop_loss),
             "tp1_filled": exi.tp1_fraction <= 0,
             "breakeven_done": False,
             "fees": fee, "funding": 0.0, "realized": -fee,
@@ -266,31 +327,63 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
 
 
 # ------------------------------------------------------------ reusable runner
-def run(cfg, symbol: str, days: int, equity: float, client=None):
-    """Fetch data and backtest one symbol. Returns (trades, daily, metrics).
-    Used by the CLI below and by research.py for config comparison."""
-    cfg.symbols = [symbol]
+def load_data(cfg, symbol: str, days: int, client=None) -> dict:
+    """Fetch everything a backtest of `symbol` needs, once. Reusing the same
+    dict for several configs guarantees they are compared on identical data."""
     client = client or ccxt.binanceusdm({"enableRateLimit": True})
     df = fetch_history(client, symbol, cfg.timeframe, days)
-    trend_df = resample(df, cfg.trend_timeframe)
-    funding = fetch_funding(client, symbol, days)
-
-    if cfg.strategy.btc_filter and symbol != "BTC/USDT":
+    data = {
+        "symbol": symbol,
+        "df": df,
+        "trend_df": resample(df, cfg.trend_timeframe),
+        "funding": fetch_funding(client, symbol, days),
+        "btc_sig": None,
+        "min_notional": 0.0,
+        "amount_step": 0.0,
+    }
+    if symbol != "BTC/USDT":
         btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, days),
                        cfg.trend_timeframe)
         fast = ema(btc["close"], cfg.strategy.trend_ema_fast)
         slow = ema(btc["close"], cfg.strategy.trend_ema_slow)
         sig = (fast > slow).astype(int) - (fast < slow).astype(int)
+        # index by the bar's CLOSE time: a lookup at time t may only see
+        # higher-timeframe bars that had finished by t (no lookahead)
+        if len(sig) > 1:
+            sig.index = sig.index + (sig.index[1] - sig.index[0])
+        data["btc_sig"] = sig
+    try:
+        client.load_markets()
+        market = client.market(symbol)
+        data["min_notional"] = float(
+            ((market.get("limits") or {}).get("cost") or {}).get("min") or 0)
+        step = (market.get("precision") or {}).get("amount")
+        data["amount_step"] = float(step) if step and float(step) < 1 else 0.0
+    except Exception as e:      # noqa: BLE001 — limits are a refinement
+        log.warning("market limits unavailable: %s", e)
+    return data
 
-        def btc_trend_lookup(ts):
-            v = sig.asof(ts)
+
+def run(cfg, symbol: str, days: int, equity: float, client=None, data=None):
+    """Backtest one symbol. Returns (trades, daily, metrics). Pass `data`
+    (from load_data) to reuse already-fetched candles."""
+    cfg.symbols = [symbol]
+    if data is None:
+        data = load_data(cfg, symbol, days, client)
+    sig = data["btc_sig"]
+
+    if cfg.strategy.btc_filter and sig is not None:
+        def btc_trend_lookup(t):
+            v = sig.asof(t)
             return int(v) if v == v else 0
     else:
-        def btc_trend_lookup(ts):
+        def btc_trend_lookup(t):
             return 0
 
-    trades, daily = run_backtest(cfg, df, trend_df, btc_trend_lookup,
-                                 funding, equity)
+    trades, daily = run_backtest(cfg, data["df"], data["trend_df"],
+                                 btc_trend_lookup, data["funding"], equity,
+                                 min_notional=data["min_notional"],
+                                 amount_step=data["amount_step"])
     # include flat days so Sharpe/Sortino aren't overstated
     if len(daily):
         all_days = pd.date_range(daily.index[0], daily.index[-1], freq="D")

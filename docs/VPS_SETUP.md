@@ -75,12 +75,11 @@ pip3 install -r requirements.txt --break-system-packages
 2. Send `/newbot`. Give it a name (e.g. "My Trading Bot") and a username
    (must end in `bot`, e.g. `yassine_trader_bot`).
 3. BotFather replies with a **token** like `7123456789:AAF...xyz`. Copy it.
-4. Open a chat with **your new bot** and send it any message (e.g. "hi") —
-   this is required so it's allowed to message you back.
-5. In a browser, open (replace TOKEN with yours):
-   `https://api.telegram.org/botTOKEN/getUpdates`
-   Find `"chat":{"id":123456789` in the response — that number is your
-   **chat id**. Copy it.
+4. That's all you need for the installer: it checks the token, asks you to
+   send your new bot any message, and finds your **chat id** by itself.
+5. Manual path only: send your bot a message, then open (replace TOKEN)
+   `https://api.telegram.org/botTOKEN/getUpdates` in a browser and find
+   `"chat":{"id":123456789` — that number is your chat id.
 
 ## Step 5 — Configure the bot (~5 min)
 
@@ -89,10 +88,11 @@ Still on the server:
 ```bash
 cd /opt/binance-bot
 cp .env.example .env
+chmod 600 .env
 nano .env
 ```
 
-`nano` is a simple text editor. Fill in the four values (arrow keys to move,
+`nano` is a simple text editor. Fill in the values (arrow keys to move,
 then `Ctrl+O` `Enter` to save, `Ctrl+X` to exit):
 
 ```
@@ -100,11 +100,10 @@ BINANCE_API_KEY=...       <- from testnet.binancefuture.com to start
 BINANCE_SECRET_KEY=...
 TELEGRAM_BOT_TOKEN=...    <- from BotFather
 TELEGRAM_CHAT_ID=...      <- from getUpdates
+BOT_MODE=testnet          <- or paper (no Binance account needed)
 ```
 
-The default `config.yaml` runs in **testnet** mode (fake money) — the right
-place to start. To run with no Binance account at all, edit `config.yaml`
-and set `mode: paper`.
+`chmod 600` makes the file readable by the server's administrator only.
 
 ## Step 6 — Verify every connection (~2 min)
 
@@ -118,7 +117,8 @@ cd /opt/binance-bot && python3 check.py
 
 You want to see `ALL CHECKS PASSED` (it also sends a test message to your
 phone). On the testnet you can additionally prove order placement works
-end-to-end — it places a far-away limit order and immediately cancels it:
+end-to-end — it places a normal order and a bracket-style stop order, far
+from the market, and immediately cancels both:
 
 ```bash
 python3 check.py --order
@@ -165,16 +165,22 @@ gets every trade.
 ## Everyday phone usage
 
 - **`/status`** — positions, equity, today's PnL, anytime.
-- **`/kill`** — emergency stop: cancels orders, closes positions, shuts the
-  engine down. (Restart later with `systemctl start binance-bot`.)
+- **`/kill`** — emergency stop: closes positions, cancels orders, shuts the
+  engine down, and keeps it off even across reboots. To start again, re-run
+  the install line. If something couldn't be closed, it tells you and keeps
+  retrying.
+- **`/senddata`** — sends you the research dataset as a file (for pooling).
 - The bot messages you on: startup, every real trade opened and closed,
   daily profit target / loss limit reached, loss-streak cooldowns, market
   data outages, and shutdown.
 
 ## Updating the bot when the code changes
 
+Re-run the install line and answer `Y` to keep your settings — it updates
+the code, checks everything and restarts the bot:
+
 ```bash
-cd /opt/binance-bot && git pull && systemctl restart binance-bot
+curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
 
 ## Security — do these, they take 5 minutes
@@ -189,12 +195,12 @@ cd /opt/binance-bot && git pull && systemctl restart binance-bot
 ## Going live later (only after weeks of good testnet results)
 
 1. Create real Binance API keys (futures-only, IP-restricted, no withdrawal).
-2. Put them in `.env`, set `mode: live` in `config.yaml`.
-3. systemd can't type a confirmation, so you must explicitly add the line
-   `Environment=BOT_CONFIRM_LIVE=yes` in
-   `/etc/systemd/system/binance-bot.service` (it's there, commented out),
-   then `systemctl daemon-reload && systemctl restart binance-bot`.
-   That extra step is deliberate — going live should never happen by accident.
+2. In `/opt/binance-bot/.env`, put the real keys and set `BOT_MODE=live`.
+3. Also add the line `BOT_CONFIRM_LIVE=yes`: a server can't type the live
+   confirmation, so this extra deliberate step stands in for it. Without it
+   the bot refuses to start live. Going live should never happen by accident.
+4. `python3 check.py` (must show your real balance), then
+   `systemctl restart binance-bot`.
 
 ## Running the research tools on the server
 

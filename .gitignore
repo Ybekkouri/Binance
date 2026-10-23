@@ -11,3 +11,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+STOPPED
+*.tmp
+.env.*
+!.env.example

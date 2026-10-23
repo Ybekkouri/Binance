@@ -102,6 +102,10 @@ class LiveBroker:
         """
         order_side = "buy" if side == "long" else "sell"
         close_side = "sell" if side == "long" else "buy"
+        # Leftover trigger orders from a previous trade on this symbol could
+        # close the new position at a stale level. We only enter when flat,
+        # so clearing them here is always safe.
+        self.cancel_all(symbol)
         try:
             entry = self.client.create_order(symbol, "market", order_side, amount)
         except ccxt.BaseError:
@@ -136,13 +140,35 @@ class LiveBroker:
             raise
         return {"id": entry.get("id"), "sl_order_id": sl.get("id")}
 
-    def replace_stop(self, symbol: str, side: str, new_stop: float,
-                     old_order_id: str = None, old_stop: float = None) -> str:
-        """Cancel the existing stop and place a new close-position stop.
-        Identifies the old stop by order id, falling back to matching its
-        trigger price among open trigger orders. Returns the new order id;
-        flattens on failure so the position is never left unprotected."""
+    def place_stop(self, symbol: str, side: str, stop: float,
+                   amount: float) -> str:
+        """Sized reduce-only stop. Used for replacements and re-protection:
+        unlike closePosition stops, several can coexist (Binance allows only
+        one closePosition stop per direction, error -4130), which lets a new
+        stop go in BEFORE the old one is cancelled."""
         close_side = "sell" if side == "long" else "buy"
+        order = self.client.create_order(
+            symbol, "market", close_side,
+            self.amount_to_precision(symbol, amount), None,
+            {"stopLossPrice": self.price_to_precision(symbol, stop),
+             "reduceOnly": True},
+        )
+        return order.get("id")
+
+    def replace_stop(self, symbol: str, side: str, new_stop: float,
+                     old_order_id: str = None, old_stop: float = None,
+                     amount: float = None) -> str:
+        """Place the new stop first, then cancel the old one, so the position
+        is never without a stop. Raises if the new stop cannot be placed —
+        the old stop is then still live and the caller retries later."""
+        if amount is None:
+            pos = next((p for p in self.open_positions()
+                        if p["symbol"] == symbol), None)
+            if pos is None:
+                return None
+            amount = pos["contracts"]
+        new_id = self.place_stop(symbol, side, new_stop, amount)
+
         cancelled = False
         if old_order_id:
             try:
@@ -156,33 +182,35 @@ class LiveBroker:
             try:
                 for o in self.client.fetch_open_orders(symbol,
                                                        params={"trigger": True}):
+                    if o.get("id") == new_id:
+                        continue
                     trig = float(o.get("triggerPrice") or
                                  o.get("stopPrice") or 0)
                     if trig and abs(trig - old_stop) / old_stop < 0.002:
                         self.client.cancel_order(o["id"], symbol,
                                                  {"trigger": True})
             except ccxt.BaseError:
-                log.exception("trigger-order scan failed on %s", symbol)
-        try:
-            new = self.client.create_order(
-                symbol, "market", close_side, None, None,
-                {"stopLossPrice": self.price_to_precision(symbol, new_stop),
-                 "closePosition": True},
-            )
-            return new.get("id")
-        except ccxt.BaseError:
-            log.exception("Failed to replace stop on %s — closing position.", symbol)
-            self.close_position(symbol)
-            raise
+                # a leftover looser stop is harmless (reduce-only, further away)
+                log.exception("old-stop cleanup failed on %s", symbol)
+        return new_id
 
-    def cancel_all(self, symbol: str) -> None:
-        """Cancel BOTH regular and conditional (trigger) orders."""
+    def cancel_all(self, symbol: str) -> bool:
+        """Cancel BOTH regular and conditional (trigger) orders.
+        Returns False when a cancel call failed for a reason other than
+        there being nothing to cancel."""
+        ok = True
         for params in ({}, {"trigger": True}):
             try:
                 self.client.cancel_all_orders(symbol, params=params)
+            except ccxt.OrderNotFound:
+                pass
             except ccxt.BaseError as e:
-                # "no orders to cancel" style errors are fine
-                log.debug("cancel_all_orders(%s, %s): %s", symbol, params, e)
+                if "no" in str(e).lower() and "order" in str(e).lower():
+                    continue   # "no orders to cancel" variants
+                ok = False
+                log.warning("cancel_all_orders(%s, %s) failed: %s",
+                            symbol, params, e)
+        return ok
 
     def close_position(self, symbol: str) -> None:
         for p in self.open_positions():
@@ -195,18 +223,37 @@ class LiveBroker:
             log.info("Closed %s position on %s.", p["side"], symbol)
         self.cancel_all(symbol)
 
-    def close_all(self) -> None:
+    def close_all(self) -> list:
+        """Flatten every position, continuing past per-symbol errors, then
+        verify. Returns the symbols still open afterwards (empty = flat).
+        Orders are cancelled only on symbols confirmed flat, so a position
+        that failed to close keeps its exchange-side stop."""
         for p in self.open_positions():
-            self.close_position(p["symbol"])
+            try:
+                side = "sell" if p["side"] == "long" else "buy"
+                self.client.create_order(p["symbol"], "market", side,
+                                         p["contracts"], None,
+                                         {"reduceOnly": True})
+                log.info("Closed %s position on %s.", p["side"], p["symbol"])
+            except ccxt.BaseError:
+                log.exception("Failed to close %s", p["symbol"])
+        still_open = [p["symbol"] for p in self.open_positions()]
         for symbol in self.cfg.symbols:
-            self.cancel_all(symbol)
+            if symbol not in still_open:
+                self.cancel_all(symbol)
+        return still_open
 
     def realized_pnl_since(self, symbol: str, since_ms: int) -> float:
         """Realized PnL + commissions + funding for a symbol since a time.
-        Paginates the income history: the endpoint returns at most 1000 rows
-        per call across ALL symbols, and funding rows accumulate fast."""
+
+        ccxt returns ledger `amount` as an ABSOLUTE value with the sign in
+        `direction`, so the raw signed `income` is read instead. Paginates
+        (the endpoint caps rows per call across all symbols), and raises if
+        no REALIZED_PNL row exists yet: Binance income rows lag fills by a
+        few seconds, and the caller retries instead of booking a partial."""
         market_id = self.client.market_id(symbol)
         total = 0.0
+        saw_realized = False
         for income_type in ("REALIZED_PNL", "COMMISSION", "FUNDING_FEE"):
             since = since_ms
             for _ in range(10):  # hard cap: 10k rows per income type
@@ -214,12 +261,28 @@ class LiveBroker:
                     since=since, limit=1000, params={"incomeType": income_type}
                 )
                 for e in entries:
-                    if e.get("info", {}).get("symbol") == market_id:
-                        total += float(e["amount"])
+                    info = e.get("info", {})
+                    if info.get("symbol") != market_id:
+                        continue
+                    total += _signed_income(e)
+                    if income_type == "REALIZED_PNL":
+                        saw_realized = True
                 if len(entries) < 1000:
                     break
                 since = int(entries[-1]["timestamp"]) + 1
+        if not saw_realized:
+            raise RuntimeError(f"no realized PnL row for {symbol} yet")
         return total
+
+
+def _signed_income(entry: dict) -> float:
+    """Signed amount of a ccxt ledger entry (raw `income` when present,
+    otherwise `amount` signed by `direction`)."""
+    raw = entry.get("info", {}).get("income")
+    if raw is not None:
+        return float(raw)
+    amount = float(entry.get("amount") or 0)
+    return -amount if entry.get("direction") == "out" else amount
 
 
 # ---------------------------------------------------------------- paper
@@ -323,15 +386,20 @@ class PaperBroker:
                 "sl_order_id": None}
 
     def replace_stop(self, symbol: str, side: str, new_stop: float,
-                     old_order_id: str = None, old_stop: float = None):
+                     old_order_id: str = None, old_stop: float = None,
+                     amount: float = None):
         pos = self.state["positions"].get(symbol)
         if pos:
             pos["stop"] = new_stop
             self._save()
         return None
 
-    def cancel_all(self, symbol: str) -> None:
-        pass
+    def place_stop(self, symbol: str, side: str, stop: float,
+                   amount: float):
+        return self.replace_stop(symbol, side, stop)
+
+    def cancel_all(self, symbol: str) -> bool:
+        return True
 
     def mark(self, symbol: str, price: float) -> None:
         """Update the mark price and trigger any SL/TP fills.
@@ -404,9 +472,10 @@ class PaperBroker:
             self._close_amount(symbol, pos["contracts"], pos["mark"], "manual_close")
             self._save()
 
-    def close_all(self) -> None:
+    def close_all(self) -> list:
         for symbol in list(self.state["positions"]):
             self.close_position(symbol)
+        return list(self.state["positions"])
 
     def realized_pnl_since(self, symbol: str, since_ms: int) -> float:
         return sum(

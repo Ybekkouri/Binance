@@ -318,6 +318,13 @@ def full_report(trades: list, source: str) -> str:
     if not trades:
         return header + "\nNo closed trades yet — run the bot and come back."
     parts = [header]
+    if source == "all" and any(t["shadow"] for t in trades) \
+            and any(not t["shadow"] for t in trades):
+        parts.append(
+            "\nCAUTION: this pools real and shadow trades. They often come "
+            "from the same candles, so the significance stars below are "
+            "overstated, and PnL mixes two accounts of different sizes. For "
+            "decisions, re-run with --source shadow or --source real.")
     for title, fn in SECTIONS:
         if title == "TRACKS" and source != "all":
             continue

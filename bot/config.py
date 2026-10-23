@@ -126,7 +126,9 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
-    mode = str(raw["mode"]).lower()
+    # BOT_MODE in .env overrides config.yaml, so switching modes never means
+    # editing a git-tracked file (which would block future updates)
+    mode = str(os.environ.get("BOT_MODE") or raw["mode"]).strip().lower()
     if mode not in MODES:
         raise SystemExit(f"mode must be one of {MODES}, got {mode!r}")
 

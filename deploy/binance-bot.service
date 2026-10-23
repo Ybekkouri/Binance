@@ -1,10 +1,7 @@
-## systemd service: keeps the bot running 24/7 and restarts it on crashes
-## and server reboots. See docs/VPS_SETUP.md for the full walkthrough.
-##
-## Install (as root, after cloning the repo to /opt/binance-bot):
-##   cp /opt/binance-bot/deploy/binance-bot.service /etc/systemd/system/
-##   systemctl daemon-reload
-##   systemctl enable --now binance-bot
+## systemd service: keeps the bot running 24/7, restarts it on crashes and
+## hangs, and survives reboots. Installed by deploy/install.sh — you never
+## need to edit this file (all settings, including live-mode confirmation,
+## live in /opt/binance-bot/.env).
 
 [Unit]
 Description=Binance futures trading engine
@@ -17,17 +14,16 @@ Wants=network-online.target
 Type=notify
 WatchdogSec=300
 NotifyAccess=all
+# startup loads exchange markets twice; testnet can be slow
+TimeoutStartSec=300
 WorkingDirectory=/opt/binance-bot
 ExecStart=/usr/bin/python3 /opt/binance-bot/main.py
-# on-failure (NOT always): the kill switch and /kill exit cleanly and must
-# STAY stopped until an explicit `systemctl start`; crashes exit non-zero
-# and still restart automatically.
+# on-failure (NOT always): the kill switch exits cleanly and must STAY
+# stopped; crashes exit non-zero and restart automatically.
 Restart=on-failure
 RestartSec=15
-# main.py asks for typed confirmation in live mode; a service has no
-# keyboard, so live mode under systemd requires this env override only
-# after you have DELIBERATELY decided to go live:
-# Environment=BOT_CONFIRM_LIVE=yes
+# 78 = refused to start live without BOT_CONFIRM_LIVE=yes: don't loop
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target
