@@ -149,7 +149,7 @@ class DataStore:
                        d.confidence, d.risk_reward, d.market_condition, d.votes,
                        s.funding_rate, s.oi_change_pct, s.spread_pct,
                        s.book_imbalance, s.long_short_ratio,
-                       s.taker_buy_sell_ratio, s.btc_trend
+                       s.taker_buy_sell_ratio, s.btc_trend, s.candle_time
                 FROM trades t
                 JOIN decisions d ON d.id = t.decision_id
                 LEFT JOIN snapshots s ON s.id = d.snapshot_id
@@ -159,13 +159,15 @@ class DataStore:
                 "exit_reason", "shadow", "confidence", "risk_reward",
                 "market_condition", "votes", "funding_rate", "oi_change_pct",
                 "spread_pct", "book_imbalance", "long_short_ratio",
-                "taker_buy_sell_ratio", "btc_trend"]
+                "taker_buy_sell_ratio", "btc_trend", "candle_time"]
         out = []
         for r in rows:
             d = dict(zip(keys, r))
             d["votes"] = json.loads(d["votes"]) if d["votes"] else []
             d["shadow"] = bool(d["shadow"])
             out.append(d)
+        if source == "all":
+            out = dedupe_overlap(out)
         return out
 
     def merge_from(self, other_path: str) -> dict:
@@ -315,3 +317,17 @@ class DataStore:
             "SELECT COUNT(*) FROM trades WHERE shadow=1").fetchone()[0]
         out["real_trades"] = out["trades"] - out["shadow_trades"]
         return out
+
+
+def dedupe_overlap(trades: list) -> list:
+    """Drop shadow trades that are twins of a real trade.
+
+    The shadow track runs the same factors at looser thresholds on the same
+    candles, so almost every real trade has a shadow copy: same symbol, same
+    candle, same direction. Pooling both would count one market event twice
+    and overstate every significance test. The real trade is kept."""
+    real_keys = {(t["symbol"], t.get("candle_time"), t["side"])
+                 for t in trades if not t["shadow"] and t.get("candle_time")}
+    return [t for t in trades
+            if not (t["shadow"] and t.get("candle_time")
+                    and (t["symbol"], t["candle_time"], t["side"]) in real_keys)]

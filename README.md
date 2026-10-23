@@ -178,7 +178,7 @@ python research.py stats                     # dataset size
 python research.py collect --interval 300    # keep collecting even when not trading
 python research.py factors                   # which factors actually predict wins?
 python research.py factors --write config_suggested.yaml   # bounded weight candidate
-python research.py compare --config-b config_suggested.yaml --days 60   # out-of-sample referee
+python research.py compare --config-b config_suggested.yaml --days 60 --offset-days 60   # out-of-sample referee
 ```
 
 ### The shadow track: trade rarely, learn constantly
@@ -234,6 +234,13 @@ arrives):
   metric to a voting factor
 - **Factors** — per-factor aligned/against performance with confidence
   intervals and z-scores vs the baseline
+- **Factor overlap** — pairs of factors that are almost always aligned
+  together (e.g. the two trend measures). Their edges can't be told apart,
+  so don't raise both weights on the same evidence
+
+When real and shadow trades are pooled (`--source all`), a shadow trade
+that duplicates a real one (same candle and direction) is counted once, so
+one market event is never treated as two pieces of evidence.
 
 The report warns about small samples and about multiple-comparison false
 positives (test enough metrics at 95% and one will star by chance) — trust
@@ -273,12 +280,13 @@ The learning discipline, in order: **collect → measure → suggest → validat
 out-of-sample → promote by hand.** Weight suggestions are bounded (±25%),
 require at least 30 trades both with and without the factor, move a weight
 only when the difference is statistically significant (95% z-test), learn
-from the shadow track by default (real and shadow trades share candles, so
-pooling them double-counts evidence), and are written to a
-*candidate* file — never applied automatically. `compare` backtests the
-candidate against the current config on the same data; promote it only if it
-wins on profit factor and drawdown, not just total PnL, and re-check on a
-second period. This is what separates learning from curve-fitting — the
+from the shadow track by default, and are written to a *candidate* file —
+never applied automatically. `compare` backtests the candidate against the
+current config on one shared dataset. Use `--offset-days` to test on an
+older window the candidate's weights were never learned from (the default
+window overlaps recent data and flatters the candidate). Promote it only if
+it wins on profit factor AND drawdown out-of-sample, and again on a second
+symbol. This is what separates learning from curve-fitting — the
 original prototype in this repo "learned" from its own trades in a circle,
 which is precisely the failure mode this pipeline is built to avoid.
 

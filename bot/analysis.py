@@ -117,15 +117,17 @@ def overview(trades: list) -> str:
 
 def tracks(trades: list) -> str:
     rows = bucket_by(trades, lambda t: "shadow" if t["shadow"] else "real")
-    out = format_rows("Real vs shadow track "
-                      "(PnL in each track's own account currency):", rows)
+    out = format_rows("Strict real trades vs the extra trades only the relaxed "
+                      "shadow track took (shadow twins of real trades are "
+                      "removed; PnL in each track's own account):", rows)
     by = {r["label"]: r for r in rows}
     if "real" in by and "shadow" in by:
         z = two_prop_z(by["real"]["wins"], by["real"]["n"],
                        by["shadow"]["wins"], by["shadow"]["n"])
         sig = "statistically significant" if abs(z) >= Z95 else \
             "NOT yet statistically significant — keep collecting"
-        out += (f"\nStrict-threshold win-rate edge: "
+        out += (f"\nWhat the strict thresholds filter out — win-rate edge "
+                f"of taken over rejected setups: "
                 f"{(by['real']['win_rate']-by['shadow']['win_rate'])*100:+.1f} "
                 f"points (z={z:.2f}, {sig})")
     return out
@@ -298,6 +300,53 @@ def factors_detailed(trades: list) -> str:
 
 
 # ---------------------------------------------------------------- report
+OVERLAP_PHI = 0.5
+
+
+def factor_overlap(trades: list) -> str:
+    """Pairs of factors that agree with each other most of the time.
+
+    If two factors are almost always aligned together (e.g. both trend
+    measures), their individual win rates in the FACTORS table describe the
+    same trades and cannot be told apart: one may be getting credit for the
+    other's edge. Measured as the phi correlation of 'aligned with the
+    trade' between each pair."""
+    if len(trades) < MIN_BUCKET * 4:
+        return "Not enough trades to measure factor overlap yet."
+    names = sorted({v["name"] for t in trades for v in t["votes"]})
+    aligned = {n: [] for n in names}
+    for t in trades:
+        direction = 1 if t["side"] == "long" else -1
+        votes = {v["name"]: v["vote"] for v in t["votes"]}
+        for n in names:
+            aligned[n].append(1 if votes.get(n, 0) * direction > 0 else 0)
+    pairs = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            xa, xb = aligned[a], aligned[b]
+            n11 = sum(1 for p, q in zip(xa, xb) if p and q)
+            n10 = sum(1 for p, q in zip(xa, xb) if p and not q)
+            n01 = sum(1 for p, q in zip(xa, xb) if q and not p)
+            n00 = len(xa) - n11 - n10 - n01
+            denom = math.sqrt((n11 + n10) * (n01 + n00) * (n11 + n01) * (n10 + n00))
+            if denom == 0:
+                continue
+            phi = (n11 * n00 - n10 * n01) / denom
+            if abs(phi) >= OVERLAP_PHI:
+                pairs.append((abs(phi), a, b, phi))
+    if not pairs:
+        return ("No strongly overlapping factor pairs (all |phi| < "
+                f"{OVERLAP_PHI}): factor results above are reasonably "
+                "independent.")
+    lines = [f"Factor pairs that move together (|phi| >= {OVERLAP_PHI}):"]
+    for _, a, b, phi in sorted(pairs, reverse=True):
+        lines.append(f"  {a:<16} {b:<16} phi={phi:+.2f}")
+    lines.append("Their rows in the FACTORS table overlap heavily — treat "
+                 "their edges as shared, and don't raise both weights on the "
+                 "same evidence.")
+    return "\n".join(lines)
+
+
 SECTIONS = [
     ("OVERVIEW", overview),
     ("TRACKS", tracks),
@@ -309,6 +358,7 @@ SECTIONS = [
     ("TIMING", timing),
     ("CONTEXT METRICS", context),
     ("FACTORS", factors_detailed),
+    ("FACTOR OVERLAP", factor_overlap),
 ]
 
 
@@ -321,10 +371,10 @@ def full_report(trades: list, source: str) -> str:
     if source == "all" and any(t["shadow"] for t in trades) \
             and any(not t["shadow"] for t in trades):
         parts.append(
-            "\nCAUTION: this pools real and shadow trades. They often come "
-            "from the same candles, so the significance stars below are "
-            "overstated, and PnL mixes two accounts of different sizes. For "
-            "decisions, re-run with --source shadow or --source real.")
+            "\nNOTE: this pools real and shadow trades. Shadow trades that "
+            "duplicate a real trade (same candle and direction) are counted "
+            "once, but PnL still mixes two accounts of different sizes — "
+            "compare win rates, or re-run with --source shadow / real.")
     for title, fn in SECTIONS:
         if title == "TRACKS" and source != "all":
             continue

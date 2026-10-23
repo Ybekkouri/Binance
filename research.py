@@ -29,7 +29,7 @@ knowledge — WITHOUT ever touching the live configuration by itself:
       caches it, and dissects it — bull/bear phases, yearly breakdown,
       regime persistence, seasonality, volatility anatomy, top drawdowns.
 
-  python research.py compare --config-b config_suggested.yaml [--days 60]
+  python research.py compare --config-b config_suggested.yaml [--days 60] [--offset-days 60]
       Out-of-sample referee: backtests the current config vs the candidate
       on the same data. Only promote the candidate if it wins here.
 
@@ -65,7 +65,7 @@ def factor_table(store: DataStore, source: str = "all") -> dict:
     'aligned' = the factor voted in the trade's direction; 'against' = it
     voted the other way but was overruled by the confluence.
     """
-    trades = store.executed_trades_with_votes(source)
+    trades = store.trades_full(source)   # 'all' drops real/shadow twins
     stats: dict = {}
     overall_wins = sum(1 for t in trades if t["pnl"] > 0)
     for t in trades:
@@ -149,9 +149,9 @@ def cmd_factors(args) -> None:
           f"{counts['shadow_trades']} shadow) — overall win rate "
           f"{table['overall_win_rate'] * 100:.1f}%")
     if args.source == "all" and counts["shadow_trades"] and counts["real_trades"]:
-        print("note: real and shadow trades often come from the SAME candles, "
-              "so pooling them double-counts evidence and overstates "
-              "significance. Prefer --source shadow (the default) or real.")
+        print("note: pooled view — shadow trades that duplicate a real trade "
+              "(same candle and direction) are counted once. PnL columns still "
+              "mix two accounts of different sizes; win rates are unit-free.")
     print()
     header = (f"{'factor':<16}{'aligned n':>10}{'win%':>7}{'pnl':>10}"
               f"{'against n':>11}{'win%':>7}{'pnl':>10}")
@@ -203,12 +203,15 @@ def cmd_compare(args) -> None:
         for f in BACKTEST_BLIND_FACTORS:
             cfg.strategy.weights[f] = cfg_a.strategy.weights.get(f, 0)
 
-    print(f"Fetching {args.days} days of {symbol} once, used for both configs...")
-    data = backtest.load_data(cfg_a, symbol, args.days)
+    ago = (f", ending {args.offset_days} days ago (out-of-sample)"
+           if args.offset_days else "")
+    print(f"Fetching {args.days} days of {symbol}{ago} once, used for both configs...")
+    data = backtest.load_data(cfg_a, symbol, args.days,
+                              offset_days=args.offset_days)
     results = {}
     for label, cfg, path in (("A (current)", cfg_a, args.config_a),
                              ("B (candidate)", cfg_b, args.config_b)):
-        print(f"\n=== {label}: {path} on {symbol}, {args.days}d ===")
+        print(f"\n=== {label}: {path} on {symbol}, {args.days}d{ago} ===")
         trades, daily, m = backtest.run(cfg, symbol, args.days, args.equity,
                                         data=data)
         print(metrics.format_report(m, daily))
@@ -228,11 +231,16 @@ def cmd_compare(args) -> None:
                       "too few trades for a meaningful ratio)")
                 continue
             print(f"{key:<18}{vb - va:+.2f}   ({better} is better)")
-        print("\nRead this as a hint, not proof: one symbol, one window, and "
-              "the candidate's weights may have been fitted on this same "
-              "recent period. Promote B only if it wins on profit factor AND "
-              "drawdown here, and again on another symbol (--symbol) or an "
-              "older window (--days with a larger number).")
+        if args.offset_days:
+            print(f"\nThis window ended {args.offset_days} days ago. If the "
+                  "bot has been collecting data for less time than that, the "
+                  "candidate never saw it: a genuine out-of-sample test.")
+        else:
+            print("\nThis window overlaps the recent period the candidate's "
+                  "weights were learned from, so it flatters B. Re-run with "
+                  "--offset-days 60 (an older window) for the real test.")
+        print("Promote B only if it wins on profit factor AND drawdown in an "
+              "out-of-sample window, and again on another symbol (--symbol).")
         print(f"(Weights of {', '.join(BACKTEST_BLIND_FACTORS)} were held equal: "
               "backtests have no historical data for them.)")
 
@@ -353,6 +361,9 @@ def main() -> None:
     p.add_argument("--config-b", required=True)
     p.add_argument("--symbol", default=None)
     p.add_argument("--days", type=int, default=60)
+    p.add_argument("--offset-days", type=int, default=0,
+                   help="end the test window this many days ago, so it does "
+                        "not overlap the data the weights were learned from")
     p.add_argument("--equity", type=float, default=1000)
 
     args = parser.parse_args()

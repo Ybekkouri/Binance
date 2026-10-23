@@ -726,6 +726,94 @@ def test_backtest_parity_features():
     assert seen and all((t - bar) in df.index for t in seen)   # bar CLOSE times
 
 
+def test_pooling_drops_shadow_twins():
+    from bot.datastore import dedupe_overlap
+    trades = [
+        {"symbol": "B", "candle_time": "c1", "side": "long", "shadow": False},
+        {"symbol": "B", "candle_time": "c1", "side": "long", "shadow": True},
+        {"symbol": "B", "candle_time": "c2", "side": "long", "shadow": True},
+        {"symbol": "B", "candle_time": "c1", "side": "short", "shadow": True},
+    ]
+    kept = dedupe_overlap(trades)
+    assert len(kept) == 3 and not any(
+        t["shadow"] and t["candle_time"] == "c1" and t["side"] == "long"
+        for t in kept)
+
+
+def test_factor_overlap_flags_twin_factors():
+    from bot.analysis import factor_overlap
+    rng = np.random.default_rng(4)
+    trades = []
+    for i in range(60):
+        dirn = 1 if i % 2 else -1
+        a = rng.random() < 0.5
+        b_ = a if rng.random() < 0.95 else not a        # b copies a
+        c = rng.random() < 0.5                           # independent
+        trades.append({"side": "long" if dirn > 0 else "short", "votes": [
+            {"name": "trend_htf", "vote": dirn if a else -dirn},
+            {"name": "trend_ltf", "vote": dirn if b_ else -dirn},
+            {"name": "volume", "vote": dirn if c else -dirn}]})
+    out = factor_overlap(trades)
+    assert "trend_htf" in out and "trend_ltf" in out
+    assert "volume" not in out
+
+
+def test_backtest_window_offset():
+    import backtest
+
+    class Clock:
+        def milliseconds(self):
+            return 100 * 86_400_000
+
+    start, end = backtest._window(Clock(), 30, 10)
+    assert end == 90 * 86_400_000 and start == 60 * 86_400_000
+
+
+def test_backtest_breakeven_on_intrabar_touch():
+    import backtest
+    cfg = make_cfg()
+    cfg.risk.min_quote_volume_24h = 0
+    cfg.exits.exit_on_opposing_signal = False
+    cfg.exits.tp1_fraction = 0.0        # isolate breakeven from the TP1 partial
+    base = zigzag(n=300)
+    entry_i = len(base) - 1
+    e, stop = 100.0, 98.0               # risk = 2.0 per unit
+    # after entry: bar A spikes to +1.2R intrabar but closes at +0.3R;
+    # bar B dips below entry (a breakeven stop is hit here);
+    # bar C falls through the ORIGINAL stop (a close-only rule exits here)
+    t0 = base.index[-1]
+    extra = pd.DataFrame(
+        {"open": [100.0, 100.6, 99.6], "high": [102.4, 100.8, 99.8],
+         "low": [99.9, 99.4, 96.5], "close": [100.6, 99.6, 96.8],
+         "volume": [1000.0] * 3},
+        index=[t0 + pd.Timedelta(minutes=15 * k) for k in (1, 2, 3)])
+    full = pd.concat([base, extra])
+
+    signal = TradeDecision(symbol="BTC/USDT", direction=LONG, entry_price=e,
+                           stop_loss=stop, take_profit_1=102.0,
+                           take_profit_2=150.0, confidence=0.9)
+    real_decide = backtest.strategy.decide
+    calls = {"n": 0}
+
+    def scripted(snap, cfg_):
+        # signal exactly once, on the chosen bar
+        if snap.candles.index[-1] == full.index[entry_i]:
+            calls["n"] += 1
+            return signal
+        return TradeDecision(symbol="BTC/USDT", direction=NO_TRADE)
+
+    backtest.strategy.decide = scripted
+    try:
+        trades, _ = backtest.run_backtest(cfg, full, htf(full), lambda t: 1,
+                                          pd.Series(dtype=float), 1000.0)
+    finally:
+        backtest.strategy.decide = real_decide
+    assert calls["n"] == 1 and len(trades) == 1, trades
+    t = trades.iloc[0]
+    assert t.reason == "stop_loss"
+    assert t.exit_time == extra.index[1], (t.exit_time, list(extra.index))
+
+
 def test_installer_syntax():
     assert os.system("bash -n deploy/install.sh") == 0
 

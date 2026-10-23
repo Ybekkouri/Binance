@@ -35,30 +35,41 @@ WINDOW = 300  # bars of context per decision, mirroring the live fetch limit
 
 
 # ------------------------------------------------------------ data
-def fetch_history(client, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
+def _window(client, days: int, offset_days: int) -> tuple[int, int]:
+    """(start_ms, end_ms) of a window `days` long that ends `offset_days`
+    ago. offset_days > 0 gives an older, out-of-sample period."""
+    end = client.milliseconds() - offset_days * 86_400_000
+    return end - days * 86_400_000, end
+
+
+def fetch_history(client, symbol: str, timeframe: str, days: int,
+                  offset_days: int = 0) -> pd.DataFrame:
     tf_ms = client.parse_timeframe(timeframe) * 1000
-    since = client.milliseconds() - days * 86_400_000
+    since, end = _window(client, days, offset_days)
     rows = []
-    while since < client.milliseconds():
+    while since < end:
         batch = client.fetch_ohlcv(symbol, timeframe, since=since, limit=1500)
         if not batch:
             break
-        rows.extend(batch)
+        rows.extend(r for r in batch if r[0] < end)
         since = batch[-1][0] + tf_ms
     df = _to_df(rows)
-    # drop the still-forming candle — the live engine never sees it either
+    # the newest candle may still be forming (always true when the window
+    # ends now) — the live engine never sees it, so neither does this
     return df.iloc[:-1] if len(df) > 1 else df
 
 
-def fetch_funding(client, symbol: str, days: int) -> pd.Series:
-    since = client.milliseconds() - days * 86_400_000
+def fetch_funding(client, symbol: str, days: int,
+                  offset_days: int = 0) -> pd.Series:
+    since, end = _window(client, days, offset_days)
     rows, out = [], {}
     try:
         rows = client.fetch_funding_rate_history(symbol, since=since, limit=1000)
     except ccxt.BaseError as e:
         log.warning("funding history unavailable: %s", e)
     for r in rows:
-        out[pd.Timestamp(r["timestamp"], unit="ms", tz="UTC")] = float(r["fundingRate"])
+        if r["timestamp"] < end:
+            out[pd.Timestamp(r["timestamp"], unit="ms", tz="UTC")] = float(r["fundingRate"])
     return pd.Series(out).sort_index()
 
 
@@ -254,10 +265,14 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
                                 (d.direction == LONG) != (sign > 0):
                             fill(close, p["contracts"], "invalidation")
                             continue
-                # breakeven / trailing, same rules as bot/manager.py
+                # breakeven / trailing, same rules as bot/manager.py. Live
+                # polls every 30s, so breakeven reacts to an intrabar TOUCH
+                # of +1R (the bar's extreme), not just the close.
                 r_gain = sign * (close - p["ref_entry"]) / p["risk_dist"]
+                extreme = hi if sign > 0 else lo
+                r_touch = sign * (extreme - p["ref_entry"]) / p["risk_dist"]
                 new_stop = None
-                if not p["breakeven_done"] and r_gain >= exi.breakeven_at_r:
+                if not p["breakeven_done"] and r_touch >= exi.breakeven_at_r:
                     new_stop = p["ref_entry"]
                     p["breakeven_done"] = True
                 if r_gain >= exi.tp1_r:
@@ -327,22 +342,24 @@ def run_backtest(cfg, df: pd.DataFrame, trend_df: pd.DataFrame,
 
 
 # ------------------------------------------------------------ reusable runner
-def load_data(cfg, symbol: str, days: int, client=None) -> dict:
+def load_data(cfg, symbol: str, days: int, client=None,
+              offset_days: int = 0) -> dict:
     """Fetch everything a backtest of `symbol` needs, once. Reusing the same
     dict for several configs guarantees they are compared on identical data."""
     client = client or ccxt.binanceusdm({"enableRateLimit": True})
-    df = fetch_history(client, symbol, cfg.timeframe, days)
+    df = fetch_history(client, symbol, cfg.timeframe, days, offset_days)
     data = {
         "symbol": symbol,
         "df": df,
         "trend_df": resample(df, cfg.trend_timeframe),
-        "funding": fetch_funding(client, symbol, days),
+        "funding": fetch_funding(client, symbol, days, offset_days),
         "btc_sig": None,
         "min_notional": 0.0,
         "amount_step": 0.0,
     }
     if symbol != "BTC/USDT":
-        btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, days),
+        btc = resample(fetch_history(client, "BTC/USDT", cfg.timeframe, days,
+                                     offset_days),
                        cfg.trend_timeframe)
         fast = ema(btc["close"], cfg.strategy.trend_ema_fast)
         slow = ema(btc["close"], cfg.strategy.trend_ema_slow)
@@ -364,12 +381,13 @@ def load_data(cfg, symbol: str, days: int, client=None) -> dict:
     return data
 
 
-def run(cfg, symbol: str, days: int, equity: float, client=None, data=None):
+def run(cfg, symbol: str, days: int, equity: float, client=None, data=None,
+        offset_days: int = 0):
     """Backtest one symbol. Returns (trades, daily, metrics). Pass `data`
     (from load_data) to reuse already-fetched candles."""
     cfg.symbols = [symbol]
     if data is None:
-        data = load_data(cfg, symbol, days, client)
+        data = load_data(cfg, symbol, days, client, offset_days)
     sig = data["btc_sig"]
 
     if cfg.strategy.btc_filter and sig is not None:
@@ -400,14 +418,19 @@ def main() -> None:
     parser.add_argument("--symbol", default=None, help="default: first configured symbol")
     parser.add_argument("--days", type=int, default=90)
     parser.add_argument("--equity", type=float, default=1000)
+    parser.add_argument("--offset-days", type=int, default=0,
+                        help="end the window this many days ago (older, "
+                             "out-of-sample period)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = load_config(args.config, require_keys=False)
     symbol = args.symbol or cfg.symbols[0]
 
-    print(f"Fetching {args.days} days of {symbol} {cfg.timeframe} data...")
-    trades, daily, m = run(cfg, symbol, args.days, args.equity)
+    ago = f", ending {args.offset_days} days ago" if args.offset_days else ""
+    print(f"Fetching {args.days} days of {symbol} {cfg.timeframe} data{ago}...")
+    trades, daily, m = run(cfg, symbol, args.days, args.equity,
+                           offset_days=args.offset_days)
     print()
     print(metrics.format_report(m, daily))
     if m.get("trades", 0):
