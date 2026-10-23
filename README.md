@@ -84,10 +84,17 @@ standing aside during chaos is the edge that survives fake news.
 
 ## Tests
 
-`python3 tests/test_bot.py` runs the offline suite (no network, no keys):
-strategy, risk limits, paper and live broker behaviour (against a fake
-exchange), stop replacement, kill switch, event guard, statistics, dataset
-merging and backtest parity. Run it after any change.
+Two offline suites (no network, no keys). Run both after any change:
+
+- `python3 tests/test_bot.py` — strategy, risk limits, paper and live
+  broker logic, stop replacement, kill switch, event guard, statistics,
+  dataset merging and backtest parity.
+- `python3 tests/test_exchange_contract.py` — drives the REAL ccxt Binance
+  client (only its HTTP transport is replaced) through every order the bot
+  sends, and checks the exact requests on the wire: bracket types and
+  endpoints, stop replacement order, cancels, position parsing, and the
+  signed PnL from Binance's income history. `requirements.txt` pins ccxt
+  to the release line these tests verified; re-run them before upgrading.
 
 ## Setup
 

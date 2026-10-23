@@ -1,4 +1,4 @@
-ccxt>=4.3.0
+ccxt>=4.5.60,<4.6  # order routing verified by tests/test_exchange_contract.py
 pandas>=2.0.0
 PyYAML>=6.0
 python-dotenv>=1.0.0
