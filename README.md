@@ -1,11 +1,13 @@
-# Binance Futures Trading Engine
+# Futures Trading Engine (Binance + MEXC)
 
 > **Not a developer? Start with [START_HERE.md](START_HERE.md)** — a
 > complete plain-language guide from zero to a running bot, phase by phase,
 > with every command ready to copy-paste. The rest of this README is the
 > technical reference.
 
-A risk-first trading engine for Binance USDⓈ-M perpetual futures. Its primary
+A risk-first trading engine for Binance USDⓈ-M perpetual futures, with
+MEXC USDT-M futures as a second supported exchange (see
+[Exchanges](#exchanges)). Its primary
 goal is **capital preservation**: it trades only when multiple independent
 factors align and every risk control is satisfied. The default action is
 **NO TRADE**.
@@ -95,6 +97,39 @@ Two offline suites (no network, no keys). Run both after any change:
   endpoints, stop replacement order, cancels, position parsing, and the
   signed PnL from Binance's income history. `requirements.txt` pins ccxt
   to the release line these tests verified; re-run them before upgrading.
+
+- `python3 tests/test_mexc_contract.py` — the same for the REAL ccxt MEXC
+  client: contract-unit conversion, order sides (1/2/3/4) and trigger
+  directions, bracket sizes that never exceed the position, hedge-mode
+  enforcement, cancels, PnL from closed-position records, and the trade
+  manager's stop re-sizing, refresh and failsafe.
+
+## Exchanges
+
+One instance trades one exchange, chosen by `BOT_EXCHANGE` in `.env`
+(`binance`, the default, or `mexc`). To use both, run two instances; the
+installer does this with `BOT_EXCHANGE=mexc` (folder `/opt/mexc-bot`,
+service `mexc-bot`). Each instance has its own state, limits and dataset;
+`research.py merge` pools the datasets.
+
+| | Binance | MEXC |
+|---|---|---|
+| Keys in `.env` | `BINANCE_API_KEY` / `BINANCE_SECRET_KEY` | `MEXC_API_KEY` / `MEXC_SECRET_KEY` |
+| Modes | paper, testnet, live | paper, live (**no testnet exists**) |
+| Prices and order book | Binance | MEXC |
+| Order sizes | base asset | whole contracts (converted by `bot/mexc_broker.py`) |
+| Stop-loss | close-position stop | sized trigger order, re-sized and refreshed by the manager |
+| Open interest, long/short, taker-flow data | yes | not published — those factors abstain |
+| Realized PnL source | income history (incl. funding) | closed-position record (net of fees, funding excluded) |
+| Order check | `check.py --order` on testnet | `check.py --order` on the live account, after typing `yes` |
+
+MEXC specifics worth knowing: the account must be in **hedge** position
+mode (the bot switches it or refuses to trade); trigger orders expire
+after 7 days, so the manager re-places the stop every 5 days and a trade
+held longer than 7 days loses its take-profit orders (the trailing stop
+still manages it); if price is ever clearly past the stop while the
+position is still open, the manager closes it at market. Backtests and
+the deep-history research always use Binance data.
 
 ## Setup
 

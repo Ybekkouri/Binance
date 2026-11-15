@@ -187,7 +187,7 @@ class Track:
         }
         candle_key = (symbol, str(snap.candles.index[-1])
                       if len(snap.candles) else "")
-        # a few seconds of slack covers clock skew vs Binance timestamps
+        # a few seconds of slack covers clock skew vs exchange timestamps
         opened_ms = int(time.time() * 1000) - 5000
         try:
             response = self.broker.enter(symbol, request["side"], amount,
@@ -270,16 +270,18 @@ class Trader:
         for symbol in self.cfg.symbols:
             self.real.broker.setup_symbol(symbol)
         log.info(
-            "Engine started (%s): %s on %s/%s | risk %.2f%%/trade, "
+            "Engine started (%s, %s): %s on %s/%s | risk %.2f%%/trade, "
             "daily -%.1f%%/+%.1f%%, weekly DD %.1f%% | shadow track: %s",
-            self.cfg.mode, ", ".join(self.cfg.symbols), self.cfg.timeframe,
+            self.cfg.exchange_name, self.cfg.mode,
+            ", ".join(self.cfg.symbols), self.cfg.timeframe,
             self.cfg.trend_timeframe, self.cfg.risk.risk_per_trade_pct,
             self.cfg.risk.daily_max_loss_pct, self.cfg.risk.daily_profit_target_pct,
             self.cfg.risk.weekly_max_drawdown_pct,
             "on" if self.shadow else "off",
         )
         self.notifier.send(
-            f"🤖 Engine started ({self.cfg.mode})\n"
+            f"🤖 Engine started — {self.cfg.exchange_name} "
+            f"({self.cfg.mode})\n"
             f"{', '.join(self.cfg.symbols)} on {self.cfg.timeframe}\n"
             f"risk {self.cfg.risk.risk_per_trade_pct}%/trade, daily "
             f"-{self.cfg.risk.daily_max_loss_pct}%/+"
@@ -469,8 +471,8 @@ class Trader:
             self.notifier.send(
                 "⚠️ Emergency stop could NOT close: "
                 f"{', '.join(map(str, still_open))}. Their stop-losses are "
-                "still on Binance. Retrying automatically — also check the "
-                "Binance app yourself.")
+                f"still on {self.cfg.exchange_name}. Retrying automatically "
+                f"— also check the {self.cfg.exchange_name} app yourself.")
             return False
 
         if os.path.isfile(self.cfg.kill_file):

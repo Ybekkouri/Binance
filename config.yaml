@@ -12,6 +12,12 @@
 # live    -> real money (requires typed confirmation at startup)
 mode: testnet
 
+# Which exchange this bot instance trades on: binance or mexc. Normally set
+# in .env as BOT_EXCHANGE (the installer writes it). One exchange per
+# instance — to use both, install the bot twice (see START_HERE.md).
+# MEXC has no testnet: only paper and live modes work there.
+exchange: binance
+
 trading:
   symbols: [BTC/USDT, ETH/USDT]
   timeframe: 15m           # execution timeframe

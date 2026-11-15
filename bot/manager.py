@@ -57,6 +57,9 @@ class TradeManager:
             "sl_order_id": sl_order_id,
             "settle_attempts": 0,
             "needs_protection": needs_protection,
+            # size and age of the live stop order (sized-stop exchanges)
+            "stop_amount": amount,
+            "stop_ts": time.time(),
         }
         self.risk.record_open(decision.symbol, info, equity)
         self.journal.position("opened", decision.symbol, track=self.track, **info)
@@ -87,8 +90,8 @@ class TradeManager:
                     f"unmanaged-{symbol}",
                     f"⚠️ Unmanaged {position['side']} position detected on "
                     f"{symbol} ({position['contracts']} contracts). The bot "
-                    "will NOT manage it — verify its stop-loss on Binance, "
-                    "or close it manually.")
+                    "will NOT manage it — verify its stop-loss on "
+                    f"{self.cfg.exchange_name}, or close it manually.")
             return
 
         price = snap.last_price
@@ -104,6 +107,7 @@ class TradeManager:
                 info["sl_order_id"] = self.broker.place_stop(
                     symbol, side, info["stop"], position["contracts"])
                 info["needs_protection"] = False
+                self._stop_placed(info, position["contracts"])
                 self.risk.save()
                 self.journal.position("reprotected", symbol, stop=info["stop"])
                 if self.notifier is not None and not self.is_shadow:
@@ -111,6 +115,13 @@ class TradeManager:
                         f"✅ Stop-loss restored on {symbol} at {info['stop']:.2f}.")
             except Exception as e:      # noqa: BLE001 — keep trying next tick
                 log.warning("re-protect %s failed: %s", symbol, e)
+
+        # 0b. Sized stops (MEXC): the stop order carries a size and expires.
+        if getattr(self.broker, "SIZED_STOPS", False) and \
+                not info.get("needs_protection"):
+            if self._stop_failsafe(symbol, info, position, price, sign):
+                return
+            self._keep_stop_sized(symbol, info, position)
 
         # 1. Liquidation proximity: flatten rather than flirt with liquidation.
         liq = position.get("liquidation_price") or 0
@@ -173,9 +184,71 @@ class TradeManager:
                                   r_gain=round(r_gain, 2))
             info["stop"] = new_stop
             info["sl_order_id"] = new_id
+            self._stop_placed(info, position["contracts"])
             if breakeven_now:
                 info["breakeven_done"] = True
             self.risk.save()
+
+    @staticmethod
+    def _stop_placed(info: dict, amount: float) -> None:
+        info["stop_amount"] = amount
+        info["stop_ts"] = time.time()
+
+    def _keep_stop_sized(self, symbol: str, info: dict, position: dict) -> None:
+        """On exchanges whose stops carry a size, a stop larger than the
+        position can be rejected when it fires. Re-place it (same price)
+        whenever the position size changed — e.g. after the TP1 partial —
+        and before the order's expiry. New stop first, then cancel the old."""
+        held = position["contracts"]
+        placed = info.get("stop_amount", info["amount"])
+        age = time.time() - info.get("stop_ts", time.time())
+        resized = abs(held - placed) > 1e-9 * max(held, placed, 1.0)
+        expiring = age > getattr(self.broker, "STOP_REFRESH_S", float("inf"))
+        if not (resized or expiring):
+            return
+        try:
+            info["sl_order_id"] = self.broker.replace_stop(
+                symbol, info["side"], info["stop"],
+                old_order_id=info.get("sl_order_id"),
+                old_stop=info["stop"],   # fallback if the id is unknown
+                amount=held)
+        except Exception as e:          # noqa: BLE001 — retry next tick
+            log.warning("stop re-size on %s failed, will retry: %s", symbol, e)
+            self.journal.error("stop_resize", f"{symbol}: {e}")
+            return
+        self._stop_placed(info, held)
+        self.risk.save()
+        self.journal.position("stop_resized", symbol, stop=info["stop"],
+                              amount=held,
+                              why="size changed" if resized else "expiry")
+
+    def _stop_failsafe(self, symbol: str, info: dict, position: dict,
+                       price: float, sign: int) -> bool:
+        """Last resort on sized-stop exchanges: if price is clearly beyond
+        the stop and the position is still open, the exchange-side stop did
+        not do its job (rejected or expired) — close at market now."""
+        buffer = 0.25 * info["risk_dist"]
+        if sign * (info["stop"] - price) < buffer:
+            return False
+        log.warning("%s price %.2f is past the stop %.2f with the position "
+                    "still open — closing at market.", symbol, price,
+                    info["stop"])
+        self.journal.position("stop_failsafe_close", symbol, price=price,
+                              stop=info["stop"])
+        try:
+            self.broker.close_position(symbol)
+        except Exception as e:          # noqa: BLE001 — retry next tick
+            log.warning("failsafe close on %s failed, will retry: %s",
+                        symbol, e)
+            self.journal.error("stop_failsafe", f"{symbol}: {e}")
+            return True
+        if self.notifier is not None and not self.is_shadow:
+            self.notifier.send(
+                f"⚠️ {symbol}: price went past the stop-loss but the "
+                "exchange had not closed the position — the bot closed it "
+                "at market.")
+        self._settle(symbol, info, reason="stop_failsafe")
+        return True
 
     def _exit_reason(self, symbol: str) -> str:
         """Best-effort exit reason: paper broker knows exactly; live infers

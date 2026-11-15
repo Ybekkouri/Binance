@@ -6,6 +6,8 @@ Two implementations behind one duck-typed interface:
                 entry is immediately protected by an exchange-side
                 close-position stop, so a bot crash never leaves an
                 unprotected position.
+  MexcBroker  — the same for MEXC futures (mexc_broker.py), chosen by
+                make_live_broker when exchange: mexc.
   PaperBroker — simulated fills against live market prices, with fees and
                 slippage, persisted to disk. No API keys required.
 
@@ -490,5 +492,13 @@ class PaperBroker:
         return None
 
 
+def make_live_broker(cfg):
+    """The real-order broker for the configured exchange."""
+    if getattr(cfg, "exchange", "binance") == "mexc":
+        from .mexc_broker import MexcBroker
+        return MexcBroker(cfg)
+    return LiveBroker(cfg)
+
+
 def make_broker(cfg):
-    return PaperBroker(cfg) if cfg.mode == "paper" else LiveBroker(cfg)
+    return PaperBroker(cfg) if cfg.mode == "paper" else make_live_broker(cfg)

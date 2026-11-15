@@ -11,6 +11,11 @@ import yaml
 from dotenv import load_dotenv
 
 MODES = ("testnet", "paper", "live")
+# exchange id -> (display name, API key env var, API secret env var)
+EXCHANGES = {
+    "binance": ("Binance", "BINANCE_API_KEY", "BINANCE_SECRET_KEY"),
+    "mexc": ("MEXC", "MEXC_API_KEY", "MEXC_SECRET_KEY"),
+}
 
 
 @dataclass
@@ -102,6 +107,8 @@ class Config:
     risk: RiskConfig = field(default=None)
     shadow: ShadowConfig = field(default=None)
     events: EventsConfig = field(default=None)
+    # which exchange this instance trades on (one exchange per instance)
+    exchange: str = "binance"
     # execution assumptions
     slippage_pct: float = 0.02
     taker_fee_pct: float = 0.05
@@ -120,6 +127,10 @@ class Config:
     telegram_token: str = ""
     telegram_chat_id: str = ""
 
+    @property
+    def exchange_name(self) -> str:
+        return EXCHANGES[self.exchange][0]
+
 
 def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
     load_dotenv()
@@ -132,11 +143,23 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
     if mode not in MODES:
         raise SystemExit(f"mode must be one of {MODES}, got {mode!r}")
 
-    api_key = os.environ.get("BINANCE_API_KEY", "")
-    api_secret = os.environ.get("BINANCE_SECRET_KEY", "")
+    # BOT_EXCHANGE in .env overrides config.yaml for the same reason
+    exchange = str(os.environ.get("BOT_EXCHANGE") or raw.get("exchange")
+                   or "binance").strip().lower()
+    if exchange not in EXCHANGES:
+        raise SystemExit(
+            f"exchange must be one of {tuple(EXCHANGES)}, got {exchange!r}")
+    if exchange == "mexc" and mode == "testnet":
+        raise SystemExit(
+            "MEXC has no futures testnet. Use BOT_MODE=paper (pretend money "
+            "on real MEXC prices) or BOT_MODE=live (real money).")
+
+    _, key_var, secret_var = EXCHANGES[exchange]
+    api_key = os.environ.get(key_var, "")
+    api_secret = os.environ.get(secret_var, "")
     if require_keys and mode != "paper" and (not api_key or not api_secret):
         raise SystemExit(
-            "BINANCE_API_KEY / BINANCE_SECRET_KEY not set. "
+            f"{key_var} / {secret_var} not set. "
             "Copy .env.example to .env and fill in your keys "
             "(or use mode: paper, which needs no keys)."
         )
@@ -150,6 +173,7 @@ def load_config(path: str = "config.yaml", require_keys: bool = True) -> Config:
     ev = raw.get("events", {})
     cfg = Config(
         mode=mode,
+        exchange=exchange,
         api_key=api_key,
         api_secret=api_secret,
         symbols=list(tr["symbols"]),

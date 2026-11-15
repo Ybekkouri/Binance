@@ -17,6 +17,10 @@ trade. You can check status or emergency-stop it from anywhere by texting it.
 >
 > Re-running it later updates the bot and keeps your settings. The steps
 > below remain as the manual path and the reference for what it does.
+>
+> **A second bot for MEXC** installs next to it (folder `/opt/mexc-bot`,
+> service `mexc-bot`) with `... | BOT_EXCHANGE=mexc bash` — see "ADDING
+> MEXC" in START_HERE.md first.
 
 ---
 
@@ -182,6 +186,9 @@ the code, checks everything and restarts the bot:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 ```
+
+If you also run the MEXC bot, update it the same way with its own line
+(`... | BOT_EXCHANGE=mexc bash`) — each bot updates separately.
 
 ## Security — do these, they take 5 minutes
 

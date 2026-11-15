@@ -4,6 +4,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | bash
 #
+# The line above installs the BINANCE bot. For a second, separate bot that
+# trades on MEXC (its own folder, its own service), use:
+#
+#   curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | BOT_EXCHANGE=mexc bash
+#
 # It installs dependencies, downloads (or updates) the bot, asks a few
 # questions (Enter skips Telegram; Enter on the Binance key = paper mode),
 # verifies every connection, and (re)starts the bot as a service that
@@ -15,7 +20,15 @@ main() {
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Ybekkouri/Binance.git}"
-DIR="${INSTALL_DIR:-/opt/binance-bot}"
+EXCHANGE="$(printf '%s' "${BOT_EXCHANGE:-binance}" | tr '[:upper:]' '[:lower:]')"
+case "$EXCHANGE" in
+    binance) EX_NAME="Binance" ;;
+    mexc)    EX_NAME="MEXC" ;;
+    *) echo "BOT_EXCHANGE must be binance or mexc (got: $EXCHANGE)"; exit 1 ;;
+esac
+# One folder and one service per exchange, so both can run side by side.
+SERVICE="${EXCHANGE}-bot"
+DIR="${INSTALL_DIR:-/opt/$SERVICE}"
 # Under `curl | bash`, stdin is the script itself: questions read the terminal.
 TTY=/dev/tty
 export DEBIAN_FRONTEND=noninteractive
@@ -44,6 +57,8 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root (log in as root, or prefix with: sudo bash)"
     exit 1
 fi
+
+say "Installing the $EX_NAME trading bot  (folder $DIR, service $SERVICE)"
 
 say "1/6 Installing system packages (python, git)..."
 echo "(on a brand-new server this can wait a few minutes for Ubuntu's own"
@@ -79,7 +94,11 @@ CONFIGURE=yes
 if [ -f .env ]; then
     echo "Current settings:"
     [ -n "$(get_env TELEGRAM_BOT_TOKEN)" ] && echo "  Telegram: set" || echo "  Telegram: not set"
-    [ -n "$(get_env BINANCE_API_KEY)" ] && echo "  Binance keys: set" || echo "  Binance keys: not set"
+    if [ "$EXCHANGE" = mexc ]; then
+        [ -n "$(get_env MEXC_API_KEY)" ] && echo "  MEXC keys: set" || echo "  MEXC keys: not set"
+    else
+        [ -n "$(get_env BINANCE_API_KEY)" ] && echo "  Binance keys: set" || echo "  Binance keys: not set"
+    fi
     echo "  Mode: $(get_env BOT_MODE)"
     ask KEEP "Keep these settings? [Y/n] "
     case "${KEEP:-y}" in [nN]*) CONFIGURE=yes ;; *) CONFIGURE=no ;; esac
@@ -99,6 +118,21 @@ if [ "$CONFIGURE" = yes ]; then
             set_env TELEGRAM_BOT_TOKEN ""; set_env TELEGRAM_CHAT_ID ""
             echo "Skipping Telegram — the bot runs without phone alerts."
             break
+        fi
+        # Two bots sharing one Telegram bot would steal each other's
+        # commands (/status, /kill): each exchange needs its own.
+        CLASH=""
+        for other in /opt/binance-bot /opt/mexc-bot; do
+            [ "$other" = "$DIR" ] && continue
+            if [ -f "$other/.env" ] && [ "$(grep -m1 '^TELEGRAM_BOT_TOKEN=' "$other/.env" | cut -d= -f2-)" = "$TG_TOKEN" ]; then
+                CLASH="$other"
+            fi
+        done
+        if [ -n "$CLASH" ]; then
+            echo "That Telegram bot is already used by your other trading bot"
+            echo "($CLASH). Create a SECOND bot with @BotFather (/newbot) for"
+            echo "$EX_NAME and paste ITS token here."
+            continue
         fi
         BOT_NAME="$(curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
             | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["result"]["username"] if d.get("ok") else "")' 2>/dev/null || true)"
@@ -122,24 +156,39 @@ if [ "$CONFIGURE" = yes ]; then
         break
     done
 
-    # --- Binance --------------------------------------------------------
+    # --- Exchange keys --------------------------------------------------
     echo ""
-    echo "BINANCE. Start with TESTNET keys (fake money) from"
-    echo "https://testnet.binancefuture.com — or press Enter for PAPER mode"
-    echo "(simulated money, real market data, no account needed)."
-    ask_secret B_KEY "Binance TESTNET API key (hidden): "
-    if [ -n "$B_KEY" ]; then
-        ask_secret B_SECRET "Binance TESTNET API secret (hidden): "
-        set_env BINANCE_API_KEY "$B_KEY"
-        set_env BINANCE_SECRET_KEY "$B_SECRET"
-        set_env BOT_MODE testnet
-        echo "Saved — mode: TESTNET."
+    if [ "$EXCHANGE" = mexc ]; then
+        # MEXC has no practice exchange, so the installer never asks for
+        # MEXC keys: real keys mean real money, and that is a deliberate
+        # step done by hand (START_HERE.md, "MEXC").
+        if [ "$(get_env BOT_MODE)" = live ]; then
+            echo "MEXC: this bot is already LIVE — keeping it that way."
+        else
+            set_env BOT_MODE paper
+            echo "MEXC: starting in PAPER mode (pretend money on real MEXC"
+            echo "prices, no account needed). MEXC has no practice exchange;"
+            echo "going live later is explained in START_HERE.md."
+        fi
     else
-        set_env BINANCE_API_KEY ""; set_env BINANCE_SECRET_KEY ""
-        set_env BOT_MODE paper
-        echo "Mode: PAPER. Re-run this installer anytime to add keys."
+        echo "BINANCE. Start with TESTNET keys (fake money) from"
+        echo "https://testnet.binancefuture.com — or press Enter for PAPER mode"
+        echo "(simulated money, real market data, no account needed)."
+        ask_secret B_KEY "Binance TESTNET API key (hidden): "
+        if [ -n "$B_KEY" ]; then
+            ask_secret B_SECRET "Binance TESTNET API secret (hidden): "
+            set_env BINANCE_API_KEY "$B_KEY"
+            set_env BINANCE_SECRET_KEY "$B_SECRET"
+            set_env BOT_MODE testnet
+            echo "Saved — mode: TESTNET."
+        else
+            set_env BINANCE_API_KEY ""; set_env BINANCE_SECRET_KEY ""
+            set_env BOT_MODE paper
+            echo "Mode: PAPER. Re-run this installer anytime to add keys."
+        fi
     fi
 fi
+set_env BOT_EXCHANGE "$EXCHANGE"
 chmod 600 .env
 
 say "5/6 Verifying every connection..."
@@ -151,19 +200,22 @@ if ! python3 check.py; then
 fi
 
 say "6/6 Starting the 24/7 service..."
-cp deploy/binance-bot.service /etc/systemd/system/
+# the unit file is written for /opt/binance-bot: point it at this instance
+sed -e "s#/opt/binance-bot#$DIR#g" \
+    -e "s#^Description=.*#Description=$EX_NAME futures trading engine#" \
+    deploy/binance-bot.service > "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
-systemctl enable -q binance-bot
+systemctl enable -q "$SERVICE"
 if [ -f STOPPED ]; then
     echo "The bot had been stopped with /kill — starting it again."
     rm -f STOPPED KILL
 fi
 # restart (not just start): an update must actually load the new code
-systemctl restart binance-bot
+systemctl restart "$SERVICE"
 
 echo ""
 echo "=============================================================="
-echo " DONE. The bot is running and will survive reboots and crashes."
+echo " DONE. The $EX_NAME bot is running and will survive reboots and crashes."
 echo ""
 echo "   Your phone should buzz shortly: 'Engine started'."
 echo "   Text /status to it anytime, /kill for emergency stop."
@@ -172,8 +224,8 @@ echo "   To update, change settings, or restart after /kill, just run"
 echo "   the same install line again."
 echo ""
 echo "   Useful commands on this server:"
-echo "     systemctl status binance-bot      is it running?"
-echo "     journalctl -u binance-bot -f      live logs"
+echo "     systemctl status $SERVICE      is it running?"
+echo "     journalctl -u $SERVICE -f      live logs"
 echo "=============================================================="
 }
 main "$@"

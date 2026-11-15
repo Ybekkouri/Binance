@@ -224,6 +224,87 @@ protect the real money.
 
 ---
 
+# ADDING MEXC — a second bot on a second exchange
+
+The same engine can trade on **MEXC** as well. It runs as a **separate
+bot** next to the Binance one: its own folder (`/opt/mexc-bot`), its own
+24/7 service (`mexc-bot`), its own money and its own daily limits. One
+bot's bad day never touches the other.
+
+**What is different on MEXC — read this before using real money there:**
+
+- **MEXC has no practice exchange (no testnet).** The only fake-money mode
+  is *paper*: pretend money on real MEXC prices. Paper mode never sends an
+  order, so the very first real MEXC order is also the first real test.
+  That is why step 4 below exists, and why you start with a very small
+  amount.
+- The MEXC part of this bot has been checked offline against the exchange
+  software, but — like the Binance part before your testnet run — it has
+  **never traded on the real MEXC servers**. Prove Binance on its testnet
+  first. Treat MEXC as the second step, not the first.
+- MEXC futures are not offered in every country, and it applies its own
+  rules to API trading. Check that your account can trade futures by API.
+
+**1. Create a second Telegram bot** (2 minutes): @BotFather → `/newbot`.
+Each trading bot needs its own Telegram bot, otherwise they would steal
+each other's `/status` and `/kill` commands.
+
+**2. Install it** — the same line as before with one extra word:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ybekkouri/Binance/main/deploy/install.sh | BOT_EXCHANGE=mexc bash
+```
+
+Paste the *new* Telegram token. It never asks for MEXC keys: it starts in
+**paper mode**. Phone: *"🤖 Engine started — MEXC (paper)"*. Let it run
+like this for a couple of weeks, exactly like Phase 1.
+
+**3. Going live on MEXC** (only after the Phase 3 checklist above is true
+for MEXC too). On **mexc.com**: profile → **API Management** → create a
+key with **Futures trading** enabled, **withdrawals disabled**, and
+restricted to your server's IP. Move a *small* amount of USDT into the
+MEXC **Futures** wallet. Leave the account's **Position Mode on "Hedge"**
+(MEXC's default — the bot needs it and will refuse to trade otherwise).
+Then on the server:
+
+```bash
+nano /opt/mexc-bot/.env
+```
+
+and make these lines read:
+
+```
+MEXC_API_KEY=<your MEXC key>
+MEXC_SECRET_KEY=<your MEXC secret>
+BOT_MODE=live
+BOT_CONFIRM_LIVE=yes
+```
+
+**4. Prove orders work before the bot trades:**
+
+```bash
+cd /opt/mexc-bot && python3 check.py --order
+```
+
+It asks you to type `yes`, then places two of the smallest possible orders
+far away from the market price on your real account and cancels them at
+once. Nothing is meant to fill. Both lines must show ✅. If either shows
+❌, stop and paste the message to whoever helps you with the bot.
+
+**5. Start it:** `systemctl restart mexc-bot`. Phone: *"🤖 Engine started —
+MEXC (live)"*.
+
+**Watch the first real MEXC trade yourself** in the MEXC app: right after
+the "📈 Opened" message you should see the position plus three waiting
+orders (one stop-loss, two take-profits). If the stop-loss is missing,
+text `/kill` to the MEXC bot.
+
+Everything else in this guide applies to the MEXC bot too — just use
+`/opt/mexc-bot` and `mexc-bot` wherever you see `/opt/binance-bot` and
+`binance-bot`.
+
+---
+
 # If something goes wrong
 
 | Problem | What to do |

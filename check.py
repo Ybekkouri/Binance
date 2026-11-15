@@ -1,7 +1,9 @@
 """Preflight check: verify every connection before running the bot.
 
     python3 check.py            # checks config, keys, data, account, telegram
-    python3 check.py --order    # ALSO does a test order round-trip (testnet only)
+    python3 check.py --order    # ALSO does a test order round-trip
+                                # (Binance testnet; on MEXC it asks first,
+                                # because MEXC has no testnet)
 
 Each check prints a clear PASS/FAIL with a plain-language fix. Run this after
 any setup change; when everything passes, the bot is safe to start.
@@ -35,16 +37,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--order", action="store_true",
-                        help="test order round-trip (testnet mode only)")
+                        help="test order round-trip (Binance testnet; on "
+                             "MEXC live it asks for confirmation)")
     args = parser.parse_args()
 
-    print("Binance bot preflight check\n" + "=" * 40)
+    print("Trading bot preflight check\n" + "=" * 40)
 
     # 1 ---- config loads
     try:
         from bot.config import load_config
         cfg = load_config(args.config, require_keys=False)
-        ok(f"config.yaml loads (mode: {cfg.mode}, symbols: {', '.join(cfg.symbols)})")
+        ok(f"config loads (exchange: {cfg.exchange_name}, mode: {cfg.mode}, "
+           f"symbols: {', '.join(cfg.symbols)})")
     except SystemExit as e:
         bad(f"config problem: {e}", "fix config.yaml and retry")
         return finish()
@@ -57,12 +61,21 @@ def main() -> None:
         warn("mode is LIVE — this checker will read your REAL account "
              "(it never places live orders).")
 
+    from bot.config import EXCHANGES
+    name, key_var, secret_var = EXCHANGES[cfg.exchange]
+    is_mexc = cfg.exchange == "mexc"
+
     # 2 ---- API keys present
     needs_keys = cfg.mode != "paper"
     if not needs_keys:
-        ok("mode is paper — no Binance keys needed")
+        ok(f"mode is paper — no {name} keys needed")
     elif cfg.api_key and cfg.api_secret:
-        ok("BINANCE_API_KEY and BINANCE_SECRET_KEY found in .env")
+        ok(f"{key_var} and {secret_var} found in .env")
+    elif is_mexc:
+        bad("MEXC API keys missing",
+            "add MEXC_API_KEY and MEXC_SECRET_KEY to the .env file in the "
+            "bot's folder (keys from mexc.com with Futures trading enabled "
+            "and withdrawals DISABLED)")
     else:
         bad("Binance API keys missing",
             "re-run the installer and enter your keys, or edit "
@@ -73,13 +86,13 @@ def main() -> None:
     try:
         from bot.market_data import MarketData
         market = MarketData(cfg)
-        ticker = market.client.fetch_ticker(cfg.symbols[0])
+        ticker = market.ticker(cfg.symbols[0])
         ok(f"market data works — {cfg.symbols[0]} last price "
            f"{float(ticker['last']):,.2f}")
         data_ok = True
     except Exception as e:                                   # noqa: BLE001
-        bad(f"cannot reach Binance market data: {e}",
-            "check the server's internet connection / firewall; Binance may "
+        bad(f"cannot reach {name} market data: {e}",
+            f"check the server's internet connection / firewall; {name} may "
             "also be geo-blocked in some regions")
         data_ok = False
 
@@ -87,22 +100,26 @@ def main() -> None:
     broker = None
     if needs_keys and cfg.api_key and data_ok:
         try:
-            from bot.broker import LiveBroker
-            broker = LiveBroker(cfg)
+            from bot.broker import make_live_broker
+            broker = make_live_broker(cfg)
             equity = broker.equity_usdt()
             ok(f"account access works — futures balance {equity:,.2f} USDT "
                f"({'TESTNET' if cfg.mode == 'testnet' else 'LIVE'})")
             if equity <= 0:
                 warn("balance is 0 — testnet accounts start with play money; "
                      "on live, transfer USDT into the FUTURES wallet "
-                     "(Binance app: Wallet -> Transfer -> Futures)")
+                     f"({name} app: Wallet -> Transfer -> Futures)")
         except Exception as e:                               # noqa: BLE001
             bad(f"API keys rejected: {e}",
-                "wrong key/secret, or keys from the wrong place: testnet mode "
-                "needs keys from testnet.binancefuture.com, live mode needs "
-                "keys from binance.com with Futures permission enabled. If "
-                "you IP-restricted the key, the restriction must include "
-                "THIS machine's IP")
+                ("wrong key/secret, or the key lacks Futures permission "
+                 "(create it on mexc.com with Futures trading enabled). "
+                 if is_mexc else
+                 "wrong key/secret, or keys from the wrong place: testnet "
+                 "mode needs keys from testnet.binancefuture.com, live mode "
+                 "needs keys from binance.com with Futures permission "
+                 "enabled. ")
+                + "If you IP-restricted the key, the restriction must "
+                  "include THIS machine's IP")
     elif cfg.mode == "paper":
         try:
             from bot.broker import PaperBroker
@@ -124,13 +141,18 @@ def main() -> None:
                 "the API key likely lacks 'Enable Futures' permission — "
                 "recreate it with Futures trading enabled (and NOTHING else)")
 
-    # 6 ---- optional order round-trip (testnet only)
-    if args.order:
+    # 6 ---- optional order round-trip
+    if args.order and is_mexc:
+        if cfg.mode != "live" or broker is None:
+            warn("--order skipped: on MEXC it needs live mode with working keys")
+        else:
+            mexc_order_test(cfg, market, broker)
+    elif args.order:
         if cfg.mode != "testnet" or broker is None:
             warn("--order skipped: only allowed in testnet mode with working keys")
         else:
             symbol = cfg.symbols[0]
-            last = float(market.client.fetch_ticker(symbol)["last"])
+            last = float(market.ticker(symbol)["last"])
             try:
                 price = broker.price_to_precision(symbol, last * 0.5)
                 amount = broker.amount_to_precision(
@@ -184,6 +206,54 @@ def main() -> None:
                 "check internet connection")
 
     finish()
+
+
+def mexc_order_test(cfg, market, broker) -> None:
+    """MEXC has no testnet, so this runs on the REAL account: it places the
+    smallest possible orders far from the market and cancels them at once.
+    Nothing is meant to fill; it proves the key can place and cancel both
+    order kinds the bot uses (regular and trigger)."""
+    symbol = cfg.symbols[0]
+    print(f"\nThis places two tiny {symbol} orders on your REAL MEXC account,"
+          "\nfar from the market price, and cancels them immediately.")
+    try:
+        answer = input("Type 'yes' to run this test: ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() != "yes":
+        warn("--order skipped (not confirmed)")
+        return
+    ex_symbol = broker._s(symbol)
+    last = float(market.ticker(symbol)["last"])
+    one = broker._contract_size(symbol) * float(
+        broker._market(symbol)["limits"]["amount"]["min"] or 1)
+    vol = broker._vol(symbol, one)
+    try:
+        # MEXC rejects limit prices more than ~10% from the market
+        price = broker.price_to_precision(symbol, last * 0.92)
+        order = broker.client.create_order(
+            ex_symbol, "limit", "buy", vol, price, broker._params())
+        broker.client.cancel_order(order["id"], ex_symbol)
+        ok("regular order round-trip works (limit placed + cancelled)")
+    except Exception as e:                                   # noqa: BLE001
+        bad(f"test order failed: {e}",
+            "check that the key has Futures trading enabled and that there "
+            "is USDT in the MEXC Futures wallet")
+    try:
+        trigger = broker.price_to_precision(symbol, last * 1.5)
+        plan = broker.client.create_order(
+            ex_symbol, "market", "buy", vol, None,
+            broker._params(triggerPrice=trigger,
+                           triggerDirection="ascending", executeCycle=1))
+        broker.client.cancel_order(plan["id"], ex_symbol, {"trigger": True})
+        ok("trigger order round-trip works (the mechanism stop-loss and "
+           "take-profit use)")
+    except Exception as e:                                   # noqa: BLE001
+        bad(f"trigger (stop/TP) test order failed: {e}",
+            "this is the mechanism real stop-losses use — do NOT trade "
+            "real money on MEXC until this passes")
+    # belt and braces: make sure nothing from the test is left resting
+    broker.cancel_all(symbol)
 
 
 def finish() -> None:

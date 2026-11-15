@@ -1,7 +1,9 @@
 """Public market data client and the MarketSnapshot the strategy consumes.
 
 Everything here uses public endpoints only (no API keys), so it is shared by
-live, testnet, and paper modes. Each snapshot records when it was taken so
+live, testnet, and paper modes. Prices come from the exchange the instance
+trades on (Binance or MEXC), so spreads and depth match where orders go.
+Each snapshot records when it was taken so
 the trader can refuse to act on stale data.
 """
 
@@ -70,12 +72,31 @@ def _to_df(raw: list) -> pd.DataFrame:
 SLOW_TTL = 300  # seconds; funding/OI/positioning move on 1h periods anyway
 
 
+def make_public_client(cfg):
+    """Keyless market-data client for the configured exchange."""
+    if getattr(cfg, "exchange", "binance") == "mexc":
+        return ccxt.mexc({"enableRateLimit": True,
+                          "options": {"defaultType": "swap"}})
+    return ccxt.binanceusdm({"enableRateLimit": True})
+
+
 class MarketData:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.client = ccxt.binanceusdm({"enableRateLimit": True})
+        self.is_mexc = getattr(cfg, "exchange", "binance") == "mexc"
+        self.client = make_public_client(cfg)
         self.client.load_markets()
         self._cache: dict = {}
+
+    def _s(self, symbol: str) -> str:
+        """Exchange symbol: MEXC needs the explicit swap form
+        ('BTC/USDT:USDT'), otherwise ccxt would pick the SPOT market."""
+        if self.is_mexc and ":" not in symbol:
+            return f"{symbol}:{symbol.split('/')[1]}"
+        return symbol
+
+    def ticker(self, symbol: str) -> dict:
+        return self.client.fetch_ticker(self._s(symbol))
 
     def _cached(self, key, fetch):
         """TTL cache for slow-moving fields — cuts per-tick request count
@@ -89,18 +110,23 @@ class MarketData:
         return value
 
     def candles(self, symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame:
-        raw = self.client.fetch_ohlcv(symbol, timeframe, limit=limit)
+        raw = self.client.fetch_ohlcv(self._s(symbol), timeframe, limit=limit)
         return _to_df(raw).iloc[:-1]  # drop the still-forming candle
 
     def book_summary(self, symbol: str, levels: int) -> Optional[BookSummary]:
-        book = self.client.fetch_order_book(symbol, limit=max(levels, 5))
+        book = self.client.fetch_order_book(self._s(symbol),
+                                            limit=max(levels, 5))
         bids, asks = book["bids"][:levels], book["asks"][:levels]
         if not bids or not asks:
             log.warning("empty order book side for %s", symbol)
             return None
         bid, ask = bids[0][0], asks[0][0]
-        bid_depth = sum(v for _, v in bids)
-        ask_depth = sum(v for _, v in asks)
+        # Depth is compared against order sizes in base-asset units. MEXC
+        # quotes its book in contracts, so convert (Binance: size is 1).
+        size = float(self.client.market(self._s(symbol)).get("contractSize")
+                     or 1.0) if self.is_mexc else 1.0
+        bid_depth = sum(level[1] for level in bids) * size
+        ask_depth = sum(level[1] for level in asks) * size
         mid = (bid + ask) / 2
         return BookSummary(
             bid=bid, ask=ask,
@@ -111,7 +137,7 @@ class MarketData:
 
     def funding_rate(self, symbol: str) -> Optional[float]:
         try:
-            fr = self.client.fetch_funding_rate(symbol)
+            fr = self.client.fetch_funding_rate(self._s(symbol))
             return float(fr["fundingRate"])
         except ccxt.BaseError as e:
             log.debug("funding rate unavailable for %s: %s", symbol, e)
@@ -119,7 +145,10 @@ class MarketData:
 
     def oi_change_pct(self, symbol: str, timeframe: str = "1h", points: int = 12
                       ) -> Optional[float]:
-        """Open interest % change over the last `points` periods."""
+        """Open interest % change over the last `points` periods.
+        (Not published by MEXC: the factor simply abstains there.)"""
+        if self.is_mexc:
+            return None
         try:
             hist = self.client.fetch_open_interest_history(
                 symbol, timeframe, limit=points
@@ -137,6 +166,8 @@ class MarketData:
     def long_short_ratio(self, symbol: str) -> Optional[float]:
         """Global long/short account ratio (Binance futures data endpoint).
         Recorded for research; >1 means more accounts are long."""
+        if self.is_mexc:
+            return None
         try:
             rows = self.client.fapiDataGetGlobalLongShortAccountRatio({
                 "symbol": self.client.market_id(symbol),
@@ -150,6 +181,8 @@ class MarketData:
     def taker_buy_sell_ratio(self, symbol: str) -> Optional[float]:
         """Taker buy/sell volume ratio — aggressive flow direction.
         Recorded for research; >1 means aggressive buying dominates."""
+        if self.is_mexc:
+            return None
         try:
             rows = self.client.fapiDataGetTakerlongshortRatio({
                 "symbol": self.client.market_id(symbol),
@@ -178,7 +211,7 @@ class MarketData:
     def snapshot(self, symbol: str, btc_trend: int) -> MarketSnapshot:
         st = self.cfg.strategy
         started = time.time()   # staleness measured from fetch START
-        ticker = self.client.fetch_ticker(symbol)
+        ticker = self.ticker(symbol)
         snap = MarketSnapshot(
             symbol=symbol,
             candles=self.candles(symbol, self.cfg.timeframe, limit=300),

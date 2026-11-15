@@ -26,7 +26,7 @@ from bot.trader import Track, Trader, stopped_marker
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Binance USDS-M futures trading engine")
+    parser = argparse.ArgumentParser(description="Futures trading engine (Binance or MEXC)")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--close-all", action="store_true",
                         help="cancel all orders, close all positions, exit")
@@ -53,7 +53,8 @@ def main() -> None:
         if os.environ.get("BOT_CONFIRM_LIVE") != "yes":
             try:
                 answer = input(
-                    "mode: live — this trades REAL money on Binance Futures.\n"
+                    f"mode: live — this trades REAL money on "
+                    f"{cfg.exchange_name} Futures.\n"
                     "Type 'live' to confirm: "
                 )
             except EOFError:
@@ -72,7 +73,8 @@ def main() -> None:
         still_open = broker.close_all()
         if still_open:
             print("Could NOT close: " + ", ".join(still_open) +
-                  " — their stop-losses were left in place. Check Binance.")
+                  " — their stop-losses were left in place. Check "
+                  + cfg.exchange_name + ".")
             raise SystemExit(1)
         print("All positions closed and their orders cancelled.")
         return
