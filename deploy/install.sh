@@ -54,7 +54,9 @@ PY
 get_env() { grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- || true; }
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Please run as root (log in as root, or prefix with: sudo bash)"
+    echo "Please run as root: log in as root, or end the install line with"
+    echo "   | sudo BOT_EXCHANGE=${BOT_EXCHANGE:-binance} bash"
+    echo "(with sudo, BOT_EXCHANGE must come AFTER the word sudo)"
     exit 1
 fi
 

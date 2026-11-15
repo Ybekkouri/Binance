@@ -134,8 +134,13 @@ def main() -> None:
     if broker is not None:
         try:
             broker.setup_symbol(cfg.symbols[0])
-            ok(f"trading permission confirmed — leverage/margin set on "
-               f"{cfg.symbols[0]}")
+            if is_mexc:
+                ok("MEXC account is in Hedge position mode (required). "
+                   "Trading permission is only proven by: "
+                   "python3 check.py --order")
+            else:
+                ok(f"trading permission confirmed — leverage/margin set on "
+                   f"{cfg.symbols[0]}")
         except Exception as e:                               # noqa: BLE001
             bad(f"cannot configure {cfg.symbols[0]}: {e}",
                 "the API key likely lacks 'Enable Futures' permission — "
@@ -212,8 +217,13 @@ def mexc_order_test(cfg, market, broker) -> None:
     """MEXC has no testnet, so this runs on the REAL account: it places the
     smallest possible orders far from the market and cancels them at once.
     Nothing is meant to fill; it proves the key can place and cancel both
-    order kinds the bot uses (regular and trigger)."""
+    order kinds the bot uses (regular and trigger). Only the two test
+    orders are cancelled — never anything else on the account."""
     symbol = cfg.symbols[0]
+    if any(p["symbol"] == symbol for p in broker.open_positions()):
+        warn(f"--order skipped: there is an open {symbol} position. Run "
+             "this test only while the bot has no position.")
+        return
     print(f"\nThis places two tiny {symbol} orders on your REAL MEXC account,"
           "\nfar from the market price, and cancels them immediately.")
     try:
@@ -246,14 +256,12 @@ def mexc_order_test(cfg, market, broker) -> None:
             broker._params(triggerPrice=trigger,
                            triggerDirection="ascending", executeCycle=1))
         broker.client.cancel_order(plan["id"], ex_symbol, {"trigger": True})
-        ok("trigger order round-trip works (the mechanism stop-loss and "
-           "take-profit use)")
+        ok("trigger order round-trip works (placing and cancelling the "
+           "order kind that stop-loss and take-profit use)")
     except Exception as e:                                   # noqa: BLE001
         bad(f"trigger (stop/TP) test order failed: {e}",
             "this is the mechanism real stop-losses use — do NOT trade "
             "real money on MEXC until this passes")
-    # belt and braces: make sure nothing from the test is left resting
-    broker.cancel_all(symbol)
 
 
 def finish() -> None:

@@ -21,6 +21,7 @@ Binance, and shapes this file:
 
 import logging
 import math
+import time
 
 import ccxt
 
@@ -30,6 +31,10 @@ log = logging.getLogger("bot.broker.mexc")
 class MexcBroker:
     SIZED_STOPS = True               # stops carry a size; manager keeps it right
     STOP_REFRESH_S = 5 * 86400       # re-place the stop well before the 7d expiry
+    # MEXC accepts an order first and matches it a moment later, so a fill
+    # (or a close) can take a few seconds to show up in the positions list.
+    FILL_LAG_S = 1.0
+    CLOSE_CHECKS = 4
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -121,7 +126,9 @@ class MexcBroker:
                     self.cfg.leverage, self._s(symbol),
                     {"openType": open_type, "positionType": position_type})
             except ccxt.BaseError as e:
-                log.debug("set_leverage(%s, %s): %s", symbol, position_type, e)
+                # usually "already set"; orders carry the leverage anyway
+                log.warning("set_leverage(%s, side %s): %s", symbol,
+                            position_type, e)
 
     # ---- account ----
     def equity_usdt(self) -> float:
@@ -211,7 +218,7 @@ class MexcBroker:
             log.exception("Entry order failed on %s — defensive flatten.", symbol)
             try:
                 self.close_position(symbol)
-            except ccxt.BaseError:
+            except Exception:           # noqa: BLE001 — keep the real error
                 log.exception("Defensive flatten also failed — CHECK EXCHANGE.")
             raise
         try:
@@ -297,10 +304,23 @@ class MexcBroker:
                  position["symbol"])
 
     def close_position(self, symbol: str) -> None:
+        """Close at market, then cancel the symbol's orders ONLY once the
+        position is confirmed gone. MEXC merely accepts the close order; if
+        it does not execute, the stop-loss must stay in place. Raises when
+        the position is still open after a few checks (the caller retries
+        on its next pass, with the stop untouched)."""
         for p in self.open_positions():
             if p["symbol"] == symbol:
                 self._market_close(p)
-        self.cancel_all(symbol)
+        for attempt in range(self.CLOSE_CHECKS):
+            if not any(p["symbol"] == symbol for p in self.open_positions()):
+                self.cancel_all(symbol)
+                return
+            if attempt < self.CLOSE_CHECKS - 1:
+                time.sleep(self.FILL_LAG_S)
+        raise RuntimeError(
+            f"{symbol}: close order sent but the position is still open — "
+            "its stop-loss was left in place")
 
     def close_all(self) -> list:
         """Flatten everything, continuing past per-symbol errors. Returns

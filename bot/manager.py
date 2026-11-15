@@ -116,11 +116,16 @@ class TradeManager:
             except Exception as e:      # noqa: BLE001 — keep trying next tick
                 log.warning("re-protect %s failed: %s", symbol, e)
 
-        # 0b. Sized stops (MEXC): the stop order carries a size and expires.
-        if getattr(self.broker, "SIZED_STOPS", False) and \
-                not info.get("needs_protection"):
+        # 0b. Stop failsafe: price clearly past the stop with the position
+        # still open. Runs when the stop is KNOWN to be missing (any
+        # exchange) and always on sized-stop exchanges (MEXC), where a stop
+        # can be rejected when it fires or expire.
+        sized = getattr(self.broker, "SIZED_STOPS", False)
+        if (sized or info.get("needs_protection")) and not self.is_shadow:
             if self._stop_failsafe(symbol, info, position, price, sign):
                 return
+        # 0c. Sized stops: keep the stop's size and age right.
+        if sized and not info.get("needs_protection"):
             self._keep_stop_sized(symbol, info, position)
 
         # 1. Liquidation proximity: flatten rather than flirt with liquidation.

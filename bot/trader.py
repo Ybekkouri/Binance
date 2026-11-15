@@ -232,11 +232,20 @@ class Track:
         """If a failed entry left a position behind (fill succeeded, bracket
         and flatten failed), take ownership of it so the manager restores
         its stop on the next tick instead of ignoring it as 'unmanaged'."""
-        try:
-            pos = next((p for p in self.broker.open_positions()
-                        if p["symbol"] == symbol), None)
-        except Exception:               # noqa: BLE001
-            return
+        # Some exchanges (MEXC) accept an order first and fill it a moment
+        # later: look more than once before deciding nothing was left.
+        lag = getattr(self.broker, "FILL_LAG_S", 0)
+        pos = None
+        for attempt in range(3 if lag else 1):
+            try:
+                pos = next((p for p in self.broker.open_positions()
+                            if p["symbol"] == symbol), None)
+            except Exception:           # noqa: BLE001
+                return
+            if pos is not None:
+                break
+            if lag and attempt < 2:
+                time.sleep(lag)
         if pos is None or symbol in self.risk.state.managed:
             return
         log.warning("[%s] failed entry left a %s position on %s — adopting "

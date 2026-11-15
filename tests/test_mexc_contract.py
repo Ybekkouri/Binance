@@ -42,6 +42,7 @@ class Wire(ccxt.mexc):
         self.reject_plan = False
         self.hedged = True
         self.refuse_mode_switch = False
+        self.ignore_closes = False   # close orders accepted but not executed
         self.plan_orders = []
 
     def fetch(self, url, method="GET", headers=None, body=None):
@@ -63,7 +64,7 @@ class Wire(ccxt.mexc):
             if payload["side"] in (1, 3):        # open long / open short
                 self.hold_vol += vol
                 self.position_type = 1 if payload["side"] == 1 else 2
-            else:
+            elif not self.ignore_closes:
                 self.hold_vol = max(0.0, self.hold_vol - vol)
             return {**OK, "data": {"orderId": str(100 + len(self.log)),
                                    "ts": T}}
@@ -136,6 +137,7 @@ def broker(**wire):
     cfg.symbols = ["BTC/USDT"]
     b = MexcBroker.__new__(MexcBroker)
     b.cfg = cfg
+    b.FILL_LAG_S = 0                 # no real waiting in tests
     b.client = Wire({"apiKey": "k", "secret": "s",
                      "options": {"defaultType": "swap"}})
     MexcBroker._prepare(b.client)
@@ -262,6 +264,24 @@ def test_close_all_closes_then_cancels_both_order_kinds():
     assert close["side"] == 4 and close["vol"] == 12
     assert calls(b, "/order/cancel_all") == [{"symbol": "BTC_USDT"}]
     assert calls(b, "/planorder/cancel_all") == [{"symbol": "BTC_USDT"}]
+
+
+def test_unexecuted_close_keeps_the_stop_and_raises():
+    # MEXC only ACCEPTS a close order; if it does not execute, the stop and
+    # take-profits must survive and the caller must be told
+    b = broker()
+    b.enter("BTC/USDT", "long", 0.0012, 49000, 51000, 0.0006, 52500)
+    b.client.ignore_closes = True
+    try:
+        b.close_position("BTC/USDT")
+        raise AssertionError("an unconfirmed close must raise")
+    except RuntimeError as e:
+        assert "still open" in str(e)
+    assert len(b.client.plan_orders) == 3
+    assert calls(b, "/planorder/cancel_all") == [{"symbol": "BTC_USDT"}]  # entry only
+    b.client.ignore_closes = False
+    b.close_position("BTC/USDT")
+    assert b.open_positions() == [] and b.client.plan_orders == []
 
 
 def test_one_way_account_is_switched_to_hedge_mode_or_refused():
@@ -416,6 +436,36 @@ def test_manager_failsafe_closes_when_price_is_past_the_stop():
     mgr2, _, journal2, snap2 = _managed(b2, 48900.0)
     mgr2.manage(snap2)
     assert "stop_failsafe_close" not in journal2.events
+
+
+def test_manager_failsafe_runs_while_the_stop_is_known_missing():
+    b = broker()
+    mgr, risk, journal, snap = _managed(b, 48000.0)   # a full 1R past the stop
+    risk.state.managed["BTC/USDT"]["needs_protection"] = True
+    b.client.reject_plan = True                       # stop cannot be restored
+    b.client.history = [{"positionId": 1, "symbol": "BTC_USDT",
+                         "positionType": 1, "state": 3, "holdVol": 0,
+                         "realised": "-2.40",
+                         "updateTime": b.client.milliseconds() + 1000}]
+    mgr.manage(snap)
+    assert "stop_failsafe_close" in journal.events
+    assert b.open_positions() == [] and risk.closed == [("BTC/USDT", -2.40)]
+
+
+def test_manager_keeps_position_managed_when_failsafe_close_is_unconfirmed():
+    b = broker()
+    mgr, risk, journal, snap = _managed(b, 48700.0)
+    b.client.ignore_closes = True
+    mgr.manage(snap)
+    assert "BTC/USDT" in risk.state.managed and risk.closed == []
+    assert len(b.client.plan_orders) == 3             # brackets untouched
+    b.client.ignore_closes = False
+    b.client.history = [{"positionId": 1, "symbol": "BTC_USDT",
+                         "positionType": 1, "state": 3, "holdVol": 0,
+                         "realised": "-1.60",
+                         "updateTime": b.client.milliseconds() + 1000}]
+    mgr.manage(snap)                                  # retried next tick
+    assert risk.closed == [("BTC/USDT", -1.60)]
 
 
 def test_config_rejects_mexc_testnet_and_reads_mexc_keys():
